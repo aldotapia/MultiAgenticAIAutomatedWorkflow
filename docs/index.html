@@ -1,0 +1,1123 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" lang="en" xml:lang="en"><head>
+
+<meta charset="utf-8">
+<meta name="generator" content="quarto-1.9.36">
+
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
+
+
+<title>Leaf River Streamflow Modeling — How This Project Works – Leaf River Streamflow Modeling</title>
+<style>
+/* Default styles provided by pandoc.
+** See https://pandoc.org/MANUAL.html#variables-for-html for config info.
+*/
+code{white-space: pre-wrap;}
+span.smallcaps{font-variant: small-caps;}
+div.columns{display: flex; gap: min(4vw, 1.5em);}
+div.column{flex: auto; overflow-x: auto;}
+div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+ul.task-list{list-style: none;}
+ul.task-list li input[type="checkbox"] {
+  width: 0.8em;
+  margin: 0 0.8em 0.2em -1em; /* quarto-specific, see https://github.com/quarto-dev/quarto-cli/issues/4556 */ 
+  vertical-align: middle;
+}
+/* CSS for syntax highlighting */
+html { -webkit-text-size-adjust: 100%; }
+pre > code.sourceCode { white-space: pre; position: relative; }
+pre > code.sourceCode > span { display: inline-block; line-height: 1.25; }
+pre > code.sourceCode > span:empty { height: 1.2em; }
+.sourceCode { overflow: visible; }
+code.sourceCode > span { color: inherit; text-decoration: inherit; }
+div.sourceCode { margin: 1em 0; }
+pre.sourceCode { margin: 0; }
+@media screen {
+div.sourceCode { overflow: auto; }
+}
+@media print {
+pre > code.sourceCode { white-space: pre-wrap; }
+pre > code.sourceCode > span { text-indent: -5em; padding-left: 5em; }
+}
+pre.numberSource code
+  { counter-reset: source-line 0; }
+pre.numberSource code > span
+  { position: relative; left: -4em; counter-increment: source-line; }
+pre.numberSource code > span > a:first-child::before
+  { content: counter(source-line);
+    position: relative; left: -1em; text-align: right; vertical-align: baseline;
+    border: none; display: inline-block;
+    -webkit-touch-callout: none; -webkit-user-select: none;
+    -khtml-user-select: none; -moz-user-select: none;
+    -ms-user-select: none; user-select: none;
+    padding: 0 4px; width: 4em;
+  }
+pre.numberSource { margin-left: 3em;  padding-left: 4px; }
+div.sourceCode
+  {   }
+@media screen {
+pre > code.sourceCode > span > a:first-child::before { text-decoration: underline; }
+}
+</style>
+
+
+<script src="https://cdn.jsdelivr.net/npm/jquery@3.5.1/dist/jquery.min.js" integrity="sha384-ZvpUoO/+PpLXR1lu4jmpXWu80pZlYUAfxl5NsBMWOEPSjUn/6Z/hRTt8+pR6L4N2" crossorigin="anonymous"></script><script src="site_libs/quarto-nav/quarto-nav.js"></script>
+<script src="site_libs/quarto-nav/headroom.min.js"></script>
+<script src="site_libs/clipboard/clipboard.min.js"></script>
+<script src="site_libs/quarto-search/autocomplete.umd.js"></script>
+<script src="site_libs/quarto-search/fuse.min.js"></script>
+<script src="site_libs/quarto-search/quarto-search.js"></script>
+<meta name="quarto:offset" content="./">
+<script src="site_libs/quarto-html/quarto.js" type="module"></script>
+<script src="site_libs/quarto-html/tabsets/tabsets.js" type="module"></script>
+<script src="site_libs/quarto-html/popper.min.js"></script>
+<script src="site_libs/quarto-html/tippy.umd.min.js"></script>
+<script src="site_libs/quarto-html/anchor.min.js"></script>
+<link href="site_libs/quarto-html/tippy.css" rel="stylesheet">
+<link href="site_libs/quarto-html/quarto-syntax-highlighting-845c23b38eaddc0f92fda52bfe77a8c8.css" rel="stylesheet" id="quarto-text-highlighting-styles">
+<script src="site_libs/bootstrap/bootstrap.min.js"></script>
+<link href="site_libs/bootstrap/bootstrap-icons.css" rel="stylesheet">
+<link href="site_libs/bootstrap/bootstrap-158031087360bce0ff56dc785ce39e06.min.css" rel="stylesheet" append-hash="true" id="quarto-bootstrap" data-mode="light">
+<script id="quarto-search-options" type="application/json">{
+  "location": "sidebar",
+  "copy-button": false,
+  "collapse-after": 3,
+  "panel-placement": "start",
+  "type": "textbox",
+  "limit": 50,
+  "keyboard-shortcut": [
+    "f",
+    "/",
+    "s"
+  ],
+  "show-item-context": false,
+  "language": {
+    "search-no-results-text": "No results",
+    "search-matching-documents-text": "matching documents",
+    "search-copy-link-title": "Copy link to search",
+    "search-hide-matches-text": "Hide additional matches",
+    "search-more-match-text": "more match in this document",
+    "search-more-matches-text": "more matches in this document",
+    "search-clear-button-title": "Clear",
+    "search-text-placeholder": "",
+    "search-detached-cancel-button-title": "Cancel",
+    "search-submit-button-title": "Submit",
+    "search-label": "Search"
+  }
+}</script>
+<script src="site_libs/quarto-diagram/mermaid.min.js"></script>
+<script src="site_libs/quarto-diagram/mermaid-init.js"></script>
+<link href="site_libs/quarto-diagram/mermaid.css" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/requirejs@2.3.6/require.min.js" integrity="sha384-c9c+LnTbwQ3aujuU7ULEPVvgLs+Fn6fJUvIGTsuu1ZcCf11fiEubah0ttpca4ntM sha384-6V1/AdqZRWk1KAlWbKBlGhN7VG4iE/yAZcO6NZPMF8od0vukrvr0tg4qY6NSrItx" crossorigin="anonymous"></script>
+
+<script type="application/javascript">define('jquery', [],function() {return window.jQuery;})</script>
+
+
+</head>
+
+<body class="nav-sidebar floating quarto-light">
+
+<div id="quarto-search-results"></div>
+  <header id="quarto-header" class="headroom fixed-top">
+  <nav class="quarto-secondary-nav">
+    <div class="container-fluid d-flex">
+      <button type="button" class="quarto-btn-toggle btn" data-bs-toggle="collapse" role="button" data-bs-target=".quarto-sidebar-collapse-item" aria-controls="quarto-sidebar" aria-expanded="false" aria-label="Toggle sidebar navigation" onclick="if (window.quartoToggleHeadroom) { window.quartoToggleHeadroom(); }">
+        <i class="bi bi-layout-text-sidebar-reverse"></i>
+      </button>
+        <nav class="quarto-page-breadcrumbs" aria-label="breadcrumb"><ol class="breadcrumb"><li class="breadcrumb-item"><a href="./index.html">Leaf River Streamflow Modeling — How This Project Works</a></li></ol></nav>
+        <a class="flex-grow-1" role="navigation" data-bs-toggle="collapse" data-bs-target=".quarto-sidebar-collapse-item" aria-controls="quarto-sidebar" aria-expanded="false" aria-label="Toggle sidebar navigation" onclick="if (window.quartoToggleHeadroom) { window.quartoToggleHeadroom(); }">      
+        </a>
+      <button type="button" class="btn quarto-search-button" aria-label="Search" onclick="window.quartoOpenSearch();">
+        <i class="bi bi-search"></i>
+      </button>
+    </div>
+  </nav>
+</header>
+<!-- content -->
+<div id="quarto-content" class="quarto-container page-columns page-rows-contents page-layout-article">
+<!-- sidebar -->
+  <nav id="quarto-sidebar" class="sidebar collapse collapse-horizontal quarto-sidebar-collapse-item sidebar-navigation floating overflow-auto">
+    <div class="pt-lg-2 mt-2 text-left sidebar-header">
+    <div class="sidebar-title mb-0 py-0">
+      <a href="./">Leaf River Streamflow Modeling</a> 
+    </div>
+      </div>
+        <div class="mt-2 flex-shrink-0 align-items-center">
+        <div class="sidebar-search">
+        <div id="quarto-search" class="" title="Search"></div>
+        </div>
+        </div>
+    <div class="sidebar-menu-container"> 
+    <ul class="list-unstyled mt-1">
+        <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="./index.html" class="sidebar-item-text sidebar-link active">
+ <span class="menu-text">Leaf River Streamflow Modeling — How This Project Works</span></a>
+  </div>
+</li>
+        <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="./01_watershed.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">Leaf River near Collins, Mississippi — Watershed Characterization</span></a>
+  </div>
+</li>
+        <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="./02_data.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">Leaf River daily data: description, quality evaluation and hydrological signatures</span></a>
+  </div>
+</li>
+        <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="./03_models.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">Five candidate models for daily streamflow of the Leaf River</span></a>
+  </div>
+</li>
+        <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="./04_metrics.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">Performance metrics for daily streamflow and the calibration objective for Leaf River</span></a>
+  </div>
+</li>
+        <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="./05_implementation.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">Implementation and Calibration</span></a>
+  </div>
+</li>
+        <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="./10_optimization.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">Optimization algorithms, settings and budgets for the five Leaf River model slots</span></a>
+  </div>
+</li>
+        <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="./16_evaluation.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">Final evaluation on the held-out window: five calibrated models, five pre-declared ensembles, one winner</span></a>
+  </div>
+</li>
+    </ul>
+    </div>
+</nav>
+<div id="quarto-sidebar-glass" class="quarto-sidebar-collapse-item" data-bs-toggle="collapse" data-bs-target=".quarto-sidebar-collapse-item"></div>
+<!-- margin-sidebar -->
+    <div id="quarto-margin-sidebar" class="sidebar margin-sidebar">
+        <nav id="TOC" role="doc-toc" class="toc-active">
+    <h2 id="toc-title">On this page</h2>
+   
+  <ul>
+  <li><a href="#why-this-page-exists" id="toc-why-this-page-exists" class="nav-link active" data-scroll-target="#why-this-page-exists"><span class="header-section-number">1</span> Why this page exists</a></li>
+  <li><a href="#sec-prompt" id="toc-sec-prompt" class="nav-link" data-scroll-target="#sec-prompt"><span class="header-section-number">2</span> The original brief</a>
+  <ul class="collapse">
+  <li><a href="#one-thing-in-the-brief-could-not-be-taken-literally" id="toc-one-thing-in-the-brief-could-not-be-taken-literally" class="nav-link" data-scroll-target="#one-thing-in-the-brief-could-not-be-taken-literally"><span class="header-section-number">2.1</span> One thing in the brief could not be taken literally</a></li>
+  </ul></li>
+  <li><a href="#sec-vocabulary" id="toc-sec-vocabulary" class="nav-link" data-scroll-target="#sec-vocabulary"><span class="header-section-number">3</span> The vocabulary</a>
+  <ul class="collapse">
+  <li><a href="#agent" id="toc-agent" class="nav-link" data-scroll-target="#agent"><span class="header-section-number">3.1</span> Agent</a></li>
+  <li><a href="#sub-agent-and-context-isolation" id="toc-sub-agent-and-context-isolation" class="nav-link" data-scroll-target="#sub-agent-and-context-isolation"><span class="header-section-number">3.2</span> Sub-agent and context isolation</a></li>
+  <li><a href="#orchestration-and-the-dependency-graph" id="toc-orchestration-and-the-dependency-graph" class="nav-link" data-scroll-target="#orchestration-and-the-dependency-graph"><span class="header-section-number">3.3</span> Orchestration and the dependency graph</a></li>
+  <li><a href="#skill" id="toc-skill" class="nav-link" data-scroll-target="#skill"><span class="header-section-number">3.4</span> Skill</a></li>
+  <li><a href="#context-handoffs-and-shared-memory" id="toc-context-handoffs-and-shared-memory" class="nav-link" data-scroll-target="#context-handoffs-and-shared-memory"><span class="header-section-number">3.5</span> Context, handoffs, and shared memory</a></li>
+  </ul></li>
+  <li><a href="#sec-guardrails" id="toc-sec-guardrails" class="nav-link" data-scroll-target="#sec-guardrails"><span class="header-section-number">4</span> The guardrails</a></li>
+  <li><a href="#sec-what-happened" id="toc-sec-what-happened" class="nav-link" data-scroll-target="#sec-what-happened"><span class="header-section-number">5</span> What actually happened</a>
+  <ul class="collapse">
+  <li><a href="#things-the-agents-caught-that-a-script-would-not-have" id="toc-things-the-agents-caught-that-a-script-would-not-have" class="nav-link" data-scroll-target="#things-the-agents-caught-that-a-script-would-not-have"><span class="header-section-number">5.1</span> Things the agents caught that a script would not have</a></li>
+  <li><a href="#things-that-went-wrong" id="toc-things-that-went-wrong" class="nav-link" data-scroll-target="#things-that-went-wrong"><span class="header-section-number">5.2</span> Things that went wrong</a></li>
+  <li><a href="#the-headline-result-contradicted-the-design" id="toc-the-headline-result-contradicted-the-design" class="nav-link" data-scroll-target="#the-headline-result-contradicted-the-design"><span class="header-section-number">5.3</span> The headline result contradicted the design</a></li>
+  </ul></li>
+  <li><a href="#sec-reading-order" id="toc-sec-reading-order" class="nav-link" data-scroll-target="#sec-reading-order"><span class="header-section-number">6</span> Reading order</a></li>
+  <li><a href="#sec-repro" id="toc-sec-repro" class="nav-link" data-scroll-target="#sec-repro"><span class="header-section-number">7</span> Reproducing this</a></li>
+  </ul>
+</nav>
+    </div>
+<!-- main -->
+<main class="content page-columns page-full" id="quarto-document-content">
+
+<header id="title-block-header" class="quarto-title-block default">
+<div class="quarto-title">
+<h1 class="title">Leaf River Streamflow Modeling — How This Project Works</h1>
+<p class="subtitle lead">A multi-agent study: the brief, the machinery, and what actually happened</p>
+</div>
+
+
+
+<div class="quarto-title-meta">
+
+    
+  
+    
+  </div>
+  
+
+
+</header>
+
+
+<section id="why-this-page-exists" class="level1" data-number="1">
+<h1 data-number="1"><span class="header-section-number">1</span> Why this page exists</h1>
+<p>This site is the output of an experiment in which <strong>sixteen separate AI agents</strong> designed, built, calibrated and evaluated hydrological models for one watershed, coordinating only through files on disk.</p>
+<p>The sections that follow explain the brief that started it, the vocabulary needed to read the rest of the site (<em>agent</em>, <em>orchestration</em>, <em>skill</em>, <em>context</em>, <em>handoff</em>), the guardrails that make the result trustworthy, and an honest account of what went wrong along the way. Read this first; the per-agent reports in the sidebar assume it.</p>
+</section>
+<section id="sec-prompt" class="level1" data-number="2">
+<h1 data-number="2"><span class="header-section-number">2</span> The original brief</h1>
+<p>The project began with a single instruction from the user. It is reproduced verbatim, because everything downstream is either a direct consequence of it or a documented deviation from it.</p>
+<div class="callout callout-style-default callout-note callout-titled">
+<div class="callout-header d-flex align-content-center" data-bs-toggle="collapse" data-bs-target=".callout-1-contents" aria-controls="callout-1" aria-expanded="true" aria-label="Toggle callout">
+<div class="callout-icon-container">
+<i class="callout-icon"></i>
+</div>
+<div class="callout-title-container flex-fill">
+<span class="screen-reader-only">Note</span>The prompt, as given
+</div>
+<div class="callout-btn-toggle d-inline-block border-0 py-1 ps-1 pe-0 float-end"><i class="callout-toggle"></i></div>
+</div>
+<div id="callout-1" class="callout-1-contents callout-collapse collapse show">
+<div class="callout-body-container callout-body">
+<blockquote class="blockquote">
+<p>Create multi-agent orchestration configuration files to model the Leaf River watershed in Mississippi, USA.</p>
+<p>Goal: create the best mode that reproduce streamflow accurately</p>
+<p>I want the following agents:</p>
+<p><strong>Agent 1:</strong> Characterize the watershed based on available online information.</p>
+<p><strong>Agent 2:</strong> Describe and evaluate the data attached (LeafRiverDaily.txt), creating a Quarto report with an extensive description of the available variables</p>
+<p><strong>Agent 3:</strong> Based on the limited information, propose a set of 5 models to use for this task. Create a Quarto document describing each model in an extensive way, including the conceptual and mathematical framework of each one (should be available in Python, or create them from scratch based on the main processes that could be interesting to represent based on the information provided by agents 1 and 2). The model it could be as basic as a simple linear regression or complex</p>
+<p><strong>Agent 4:</strong> create a list of all the possible metrics that could be useful for this task, in a Quarto document as well, and recommend the one that suits the best for this case</p>
+<p><strong>Agents 5, 6, 7, 8, and 9:</strong> each one in charge of building each model</p>
+<p><strong>Agent 10:</strong> create a list of optimization algorithms (Quarto document) and recommend the best fit for this case</p>
+<p><strong>Agents 11, 12, 13, 14, and 15:</strong> each one in charge of parameter optimization of the above models</p>
+<p><strong>Agent 16:</strong> Evaluate the model and select the best one. For this case, report KGE and NSE metrics.</p>
+<p>The evaluation period should follow: Performance metric values should be computed by running the model for the period from Oct 1, 1948 through Sept 30, 1951. The first three months (Oct 1 through Dec 31) of 1948 are used as a “warm-up” period to allow for state initialization errors to be minimized – accordingly, the metric values were computed only for the period from Jan 1, 1949 to Sept 30, 1951.</p>
+<p>The previous period could be used as calibration</p>
+<p>Create the configuration files to later start working with each agent.</p>
+<p>You have total freedom to select the best options for this task. Create backup of the work to provide context to other agents. Create skills for every agent, in a very detailed way.</p>
+<p>Ask me anything that it’s missing here.</p>
+</blockquote>
+</div>
+</div>
+</div>
+<section id="one-thing-in-the-brief-could-not-be-taken-literally" class="level2" data-number="2.1">
+<h2 data-number="2.1" class="anchored" data-anchor-id="one-thing-in-the-brief-could-not-be-taken-literally"><span class="header-section-number">2.1</span> One thing in the brief could not be taken literally</h2>
+<p>The brief says the evaluation window is Oct 1 1948 – Sep 30 1951 and that <em>“the previous period could be used as calibration”</em>. <strong>There is no previous period</strong>: the data file begins on 1 October 1948, so the evaluation window sits at the very start of the record. Calibration therefore had to run <em>forward</em> from 1 October 1951 to the end of the record in 1988. This is logged in <code>context/DECISIONS.md</code> as a scaffold-time decision rather than silently assumed.</p>
+</section>
+</section>
+<section id="sec-vocabulary" class="level1 page-columns page-full" data-number="3">
+<h1 data-number="3"><span class="header-section-number">3</span> The vocabulary</h1>
+<section id="agent" class="level2" data-number="3.1">
+<h2 data-number="3.1" class="anchored" data-anchor-id="agent"><span class="header-section-number">3.1</span> Agent</h2>
+<p>An <strong>agent</strong> is a language model given (a) a role, (b) a specific set of tools — read files, write files, run shell commands, search the web — and (c) a task, which it then carries out autonomously: deciding what to read, what code to write, what to check, and when it is finished.</p>
+<p>The important property is that an agent is <em>not</em> a script. It makes judgement calls. Several of the most consequential results in this study came from an agent deciding to do something it was not explicitly told to do — and several of the problems came from the same freedom.</p>
+<p>Each agent here is defined by a short Markdown file in <code>.claude/agents/</code>, e.g.:</p>
+<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb1"><pre class="sourceCode yaml code-with-copy"><code class="sourceCode yaml"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true" tabindex="-1"></a><span class="pp">---</span></span>
+<span id="cb1-2"><a href="#cb1-2" aria-hidden="true" tabindex="-1"></a><span class="fu">name</span><span class="kw">:</span><span class="at"> a06-model-builder-2</span></span>
+<span id="cb1-3"><a href="#cb1-3" aria-hidden="true" tabindex="-1"></a><span class="fu">description</span><span class="kw">:</span><span class="at"> Implements model slot 2 from config/models.yaml as a tested Python module.</span></span>
+<span id="cb1-4"><a href="#cb1-4" aria-hidden="true" tabindex="-1"></a><span class="fu">tools</span><span class="kw">:</span><span class="at"> Read, Write, Edit, Bash, Glob, Grep</span></span>
+<span id="cb1-5"><a href="#cb1-5" aria-hidden="true" tabindex="-1"></a><span class="fu">model</span><span class="kw">:</span><span class="at"> opus</span></span>
+<span id="cb1-6"><a href="#cb1-6" aria-hidden="true" tabindex="-1"></a><span class="fu">skills</span><span class="kw">:</span><span class="at"> </span><span class="kw">[</span><span class="at">a06-model-builder</span><span class="dv">-2</span><span class="kw">]</span></span>
+<span id="cb1-7"><a href="#cb1-7" aria-hidden="true" tabindex="-1"></a><span class="pp">---</span></span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+</section>
+<section id="sub-agent-and-context-isolation" class="level2" data-number="3.2">
+<h2 data-number="3.2" class="anchored" data-anchor-id="sub-agent-and-context-isolation"><span class="header-section-number">3.2</span> Sub-agent and context isolation</h2>
+<p>Each of the sixteen agents runs as a <strong>sub-agent</strong>: a separate conversation with its own fresh context window, launched by a coordinating “orchestrator” agent. This matters for a practical reason. A language model has a finite context; sixteen agents’ worth of exploration, dead ends and file dumps would not fit in one. Isolation means each agent sees only what it needs.</p>
+<p>The cost of isolation is that agents cannot talk to each other. Everything they need to share must be written down — which is what the rest of this machinery is for.</p>
+</section>
+<section id="orchestration-and-the-dependency-graph" class="level2 page-columns page-full" data-number="3.3">
+<h2 data-number="3.3" class="anchored" data-anchor-id="orchestration-and-the-dependency-graph"><span class="header-section-number">3.3</span> Orchestration and the dependency graph</h2>
+<p><strong>Multi-agent orchestration</strong> is the coordination layer: deciding which agents run, in what order, what each one needs before it can start, and what it must produce before anything downstream may begin.</p>
+<p>Here that graph lives in <code>orchestration.yaml</code>. It is a directed acyclic graph grouped into six phases; agents within a phase are independent and run in parallel.</p>
+<div class="column-page">
+<div class="cell" data-layout-align="default">
+<details class="code-fold">
+<summary>Code</summary>
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb2"><pre class="sourceCode default code-with-copy"><code class="sourceCode default"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true" tabindex="-1"></a>flowchart LR</span>
+<span id="cb2-2"><a href="#cb2-2" aria-hidden="true" tabindex="-1"></a>  subgraph P1["P1 · context"]</span>
+<span id="cb2-3"><a href="#cb2-3" aria-hidden="true" tabindex="-1"></a>    A01["a01&lt;br/&gt;watershed"]</span>
+<span id="cb2-4"><a href="#cb2-4" aria-hidden="true" tabindex="-1"></a>    A02["a02&lt;br/&gt;data EDA"]</span>
+<span id="cb2-5"><a href="#cb2-5" aria-hidden="true" tabindex="-1"></a>  end</span>
+<span id="cb2-6"><a href="#cb2-6" aria-hidden="true" tabindex="-1"></a>  subgraph P2["P2 · design"]</span>
+<span id="cb2-7"><a href="#cb2-7" aria-hidden="true" tabindex="-1"></a>    A03["a03&lt;br/&gt;5 models"]</span>
+<span id="cb2-8"><a href="#cb2-8" aria-hidden="true" tabindex="-1"></a>    A04["a04&lt;br/&gt;metrics"]</span>
+<span id="cb2-9"><a href="#cb2-9" aria-hidden="true" tabindex="-1"></a>  end</span>
+<span id="cb2-10"><a href="#cb2-10" aria-hidden="true" tabindex="-1"></a>  subgraph P3["P3 · search"]</span>
+<span id="cb2-11"><a href="#cb2-11" aria-hidden="true" tabindex="-1"></a>    A10["a10&lt;br/&gt;optimizers"]</span>
+<span id="cb2-12"><a href="#cb2-12" aria-hidden="true" tabindex="-1"></a>  end</span>
+<span id="cb2-13"><a href="#cb2-13" aria-hidden="true" tabindex="-1"></a>  subgraph P4["P4 · build"]</span>
+<span id="cb2-14"><a href="#cb2-14" aria-hidden="true" tabindex="-1"></a>    A05["a05 slot 1"]</span>
+<span id="cb2-15"><a href="#cb2-15" aria-hidden="true" tabindex="-1"></a>    A06["a06 slot 2"]</span>
+<span id="cb2-16"><a href="#cb2-16" aria-hidden="true" tabindex="-1"></a>    A07["a07 slot 3"]</span>
+<span id="cb2-17"><a href="#cb2-17" aria-hidden="true" tabindex="-1"></a>    A08["a08 slot 4"]</span>
+<span id="cb2-18"><a href="#cb2-18" aria-hidden="true" tabindex="-1"></a>    A09["a09 slot 5"]</span>
+<span id="cb2-19"><a href="#cb2-19" aria-hidden="true" tabindex="-1"></a>  end</span>
+<span id="cb2-20"><a href="#cb2-20" aria-hidden="true" tabindex="-1"></a>  subgraph P5["P5 · calibrate"]</span>
+<span id="cb2-21"><a href="#cb2-21" aria-hidden="true" tabindex="-1"></a>    A11["a11-a14&lt;br/&gt;slots 1-4"]</span>
+<span id="cb2-22"><a href="#cb2-22" aria-hidden="true" tabindex="-1"></a>    A15B["a15b&lt;br/&gt;slot 5 budgeted"]</span>
+<span id="cb2-23"><a href="#cb2-23" aria-hidden="true" tabindex="-1"></a>  end</span>
+<span id="cb2-24"><a href="#cb2-24" aria-hidden="true" tabindex="-1"></a>  A16["a16 evaluate&lt;br/&gt;ONLY agent allowed&lt;br/&gt;the held-out window"]</span>
+<span id="cb2-25"><a href="#cb2-25" aria-hidden="true" tabindex="-1"></a>  A01 --&gt; A03</span>
+<span id="cb2-26"><a href="#cb2-26" aria-hidden="true" tabindex="-1"></a>  A02 --&gt; A03</span>
+<span id="cb2-27"><a href="#cb2-27" aria-hidden="true" tabindex="-1"></a>  A02 --&gt; A04</span>
+<span id="cb2-28"><a href="#cb2-28" aria-hidden="true" tabindex="-1"></a>  A03 --&gt; A10</span>
+<span id="cb2-29"><a href="#cb2-29" aria-hidden="true" tabindex="-1"></a>  A04 --&gt; A10</span>
+<span id="cb2-30"><a href="#cb2-30" aria-hidden="true" tabindex="-1"></a>  A03 --&gt; A05</span>
+<span id="cb2-31"><a href="#cb2-31" aria-hidden="true" tabindex="-1"></a>  A03 --&gt; A06</span>
+<span id="cb2-32"><a href="#cb2-32" aria-hidden="true" tabindex="-1"></a>  A03 --&gt; A07</span>
+<span id="cb2-33"><a href="#cb2-33" aria-hidden="true" tabindex="-1"></a>  A03 --&gt; A08</span>
+<span id="cb2-34"><a href="#cb2-34" aria-hidden="true" tabindex="-1"></a>  A03 --&gt; A09</span>
+<span id="cb2-35"><a href="#cb2-35" aria-hidden="true" tabindex="-1"></a>  A10 --&gt; A11</span>
+<span id="cb2-36"><a href="#cb2-36" aria-hidden="true" tabindex="-1"></a>  A05 --&gt; A11</span>
+<span id="cb2-37"><a href="#cb2-37" aria-hidden="true" tabindex="-1"></a>  A06 --&gt; A11</span>
+<span id="cb2-38"><a href="#cb2-38" aria-hidden="true" tabindex="-1"></a>  A07 --&gt; A11</span>
+<span id="cb2-39"><a href="#cb2-39" aria-hidden="true" tabindex="-1"></a>  A08 --&gt; A11</span>
+<span id="cb2-40"><a href="#cb2-40" aria-hidden="true" tabindex="-1"></a>  A09 --&gt; A15B</span>
+<span id="cb2-41"><a href="#cb2-41" aria-hidden="true" tabindex="-1"></a>  A10 --&gt; A15B</span>
+<span id="cb2-42"><a href="#cb2-42" aria-hidden="true" tabindex="-1"></a>  A11 --&gt; A16</span>
+<span id="cb2-43"><a href="#cb2-43" aria-hidden="true" tabindex="-1"></a>  A15B --&gt; A16</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+</details>
+<div class="cell-output-display">
+<div id="fig-dag" class="quarto-float quarto-figure quarto-figure-center anchored">
+<figure class="quarto-float quarto-float-fig figure">
+<div aria-describedby="fig-dag-caption-0ceaefa1-69ba-4598-a22c-09a6ac19f8ca">
+<div>
+<pre class="mermaid mermaid-js" data-label="fig-dag">flowchart LR
+  subgraph P1["P1 · context"]
+    A01["a01&lt;br/&gt;watershed"]
+    A02["a02&lt;br/&gt;data EDA"]
+  end
+  subgraph P2["P2 · design"]
+    A03["a03&lt;br/&gt;5 models"]
+    A04["a04&lt;br/&gt;metrics"]
+  end
+  subgraph P3["P3 · search"]
+    A10["a10&lt;br/&gt;optimizers"]
+  end
+  subgraph P4["P4 · build"]
+    A05["a05 slot 1"]
+    A06["a06 slot 2"]
+    A07["a07 slot 3"]
+    A08["a08 slot 4"]
+    A09["a09 slot 5"]
+  end
+  subgraph P5["P5 · calibrate"]
+    A11["a11-a14&lt;br/&gt;slots 1-4"]
+    A15B["a15b&lt;br/&gt;slot 5 budgeted"]
+  end
+  A16["a16 evaluate&lt;br/&gt;ONLY agent allowed&lt;br/&gt;the held-out window"]
+  A01 --&gt; A03
+  A02 --&gt; A03
+  A02 --&gt; A04
+  A03 --&gt; A10
+  A04 --&gt; A10
+  A03 --&gt; A05
+  A03 --&gt; A06
+  A03 --&gt; A07
+  A03 --&gt; A08
+  A03 --&gt; A09
+  A10 --&gt; A11
+  A05 --&gt; A11
+  A06 --&gt; A11
+  A07 --&gt; A11
+  A08 --&gt; A11
+  A09 --&gt; A15B
+  A10 --&gt; A15B
+  A11 --&gt; A16
+  A15B --&gt; A16
+</pre>
+</div>
+</div>
+<figcaption class="quarto-float-caption-bottom quarto-float-caption quarto-float-fig" id="fig-dag-caption-0ceaefa1-69ba-4598-a22c-09a6ac19f8ca">
+Figure&nbsp;1: The dependency graph. Agents inside a phase are independent and ran in parallel; a phase begins only when every dependency reports <code>done</code>.
+</figcaption>
+</figure>
+</div>
+</div>
+</div>
+</div>
+<p>The phases are not arbitrary. Each one exists because its outputs are <em>inputs</em> to the next: you cannot choose an optimizer (P3) before you know what models you are optimizing (P2) or what objective you are maximising (P2); you cannot build a model (P4) before its equations are specified (P2).</p>
+</section>
+<section id="skill" class="level2" data-number="3.4">
+<h2 data-number="3.4" class="anchored" data-anchor-id="skill"><span class="header-section-number">3.4</span> Skill</h2>
+<p>A <strong>skill</strong> is a detailed, reusable procedure attached to an agent — the difference between telling someone “do the data analysis” and handing them a laboratory protocol. Each agent here has one, in <code>.claude/skills/&lt;agent&gt;/SKILL.md</code>, typically 60–90 lines specifying the exact steps, the statistics to compute, the figures to produce, the checks that must pass, and the contents of its handoff.</p>
+<p>Skills are what make an agent’s output <em>predictable</em> rather than merely plausible. They also encode institutional knowledge: a02’s skill, for example, mandates a Mann–Kendall trend test, a Pettitt change-point test and a double-mass curve — quality checks a general instruction would not have produced.</p>
+</section>
+<section id="context-handoffs-and-shared-memory" class="level2" data-number="3.5">
+<h2 data-number="3.5" class="anchored" data-anchor-id="context-handoffs-and-shared-memory"><span class="header-section-number">3.5</span> Context, handoffs, and shared memory</h2>
+<p>Because agents cannot speak to one another, the project uses a set of append-only files as shared memory:</p>
+<table class="caption-top table">
+<colgroup>
+<col style="width: 50%">
+<col style="width: 50%">
+</colgroup>
+<thead>
+<tr class="header">
+<th>File</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td><code>context/CONTEXT.md</code></td>
+<td>Each agent appends one section on finishing: key findings with units, outputs, what downstream agents must know.</td>
+</tr>
+<tr class="even">
+<td><code>context/handoffs/aNN.json</code></td>
+<td>Machine-readable results: <code>key_numbers</code>, <code>assumptions</code>, <code>downstream_notes</code> addressed to specific later agents.</td>
+</tr>
+<tr class="odd">
+<td><code>context/DECISIONS.md</code></td>
+<td>Every non-obvious choice, with the alternatives considered and the reason.</td>
+</tr>
+<tr class="even">
+<td><code>context/ISSUES.md</code></td>
+<td>Problems found in <em>other</em> agents’ work. Agents never edit each other’s files; they file an issue.</td>
+</tr>
+<tr class="odd">
+<td><code>context/state.json</code></td>
+<td>Which agents are <code>pending</code> / <code>running</code> / <code>done</code>. Gates the whole graph.</td>
+</tr>
+<tr class="even">
+<td><code>context/backups/</code> + git tags</td>
+<td>Every agent commits and tags on finishing, so any step can be rolled back.</td>
+</tr>
+</tbody>
+</table>
+<p>The <code>downstream_notes</code> field deserves emphasis: it lets an agent write a message addressed to a specific future agent that does not exist yet. a01 left a02 a note about unit conversion; a02 left the ML builders the exact scaling constants they were permitted to use.</p>
+</section>
+</section>
+<section id="sec-guardrails" class="level1" data-number="4">
+<h1 data-number="4"><span class="header-section-number">4</span> The guardrails</h1>
+<p>A multi-agent study can fail silently. Sixteen agents each making a small, locally reasonable choice can collectively produce a result that is worthless. Four mechanisms were used to prevent that.</p>
+<p><strong>1. One way to load data, one way to score.</strong> Every agent reads the record through <code>src/common/data.py</code> and computes KGE/NSE through <code>src/common/metrics.py</code>. Nobody re-implements either. The canonical metrics file was verified byte-identical to its original at the end of the study.</p>
+<p><strong>2. A hard guard on the held-out window.</strong> The evaluation period is not merely <em>discouraged</em> — it is unreachable. <code>slice_run(df, "evaluation")</code> raises <code>PermissionError</code> unless the environment variable <code>LR_AGENT=a16</code> is set, and only the evaluator sets it:</p>
+<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb3"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb3-1"><a href="#cb3-1" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> _guard(which, allow_evaluation):</span>
+<span id="cb3-2"><a href="#cb3-2" aria-hidden="true" tabindex="-1"></a>    <span class="cf">if</span> which <span class="op">==</span> <span class="st">"evaluation"</span> <span class="kw">and</span> <span class="kw">not</span> (allow_evaluation <span class="kw">and</span> os.environ.get(<span class="st">"LR_AGENT"</span>) <span class="op">==</span> <span class="st">"a16"</span>):</span>
+<span id="cb3-3"><a href="#cb3-3" aria-hidden="true" tabindex="-1"></a>        <span class="cf">raise</span> <span class="pp">PermissionError</span>(<span class="st">"Evaluation period is reserved for Agent 16 (set LR_AGENT=a16)."</span>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<p>This was checked at the end rather than trusted: the guard fires, no model or optimizer code hard-codes evaluation dates or row indices, and every other agent’s code only ever <em>removes</em> that variable.</p>
+<p><strong>3. A model contract.</strong> Every model subclasses <code>BaseModel</code> with the same <code>simulate(forcing, params)</code> signature, units of mm/day, and determinism given parameters and seed. This is why one shared calibration runner could drive five structurally unrelated models, and why the evaluator could treat them uniformly.</p>
+<p><strong>4. Pre-registration.</strong> Eight falsifiable hypotheses were written down in <a href="./03_models.html#sec-hypotheses">the hypotheses section</a> of the model report <em>before</em> any model was calibrated, so the final report adjudicates predictions rather than constructing a story around whatever happened.</p>
+</section>
+<section id="sec-what-happened" class="level1" data-number="5">
+<h1 data-number="5"><span class="header-section-number">5</span> What actually happened</h1>
+<p>An honest account, because the failures are more instructive than the successes.</p>
+<section id="things-the-agents-caught-that-a-script-would-not-have" class="level2" data-number="5.1">
+<h2 data-number="5.1" class="anchored" data-anchor-id="things-the-agents-caught-that-a-script-would-not-have"><span class="header-section-number">5.1</span> Things the agents caught that a script would not have</h2>
+<ul>
+<li><strong>a01 proved the data file’s identity.</strong> Asked only to characterize the watershed, it went further and matched the <code>Q</code> column against the USGS record for gauge 02472000: <strong>r = 1.000000</strong> over 13,515 days. That turned an ambiguity about the calendar into a measurement.</li>
+<li><strong>a02 measured the units instead of assuming them.</strong> It found <code>Q</code> quantised at 0.0012544 mm/day — exactly 1 ft³/s over 1,950 km² — confirming both the units and the basin area independently.</li>
+<li><strong>a03 overrode its own instructions.</strong> Told to propose five models, it rejected HYMOD (a default choice) because HYMOD’s single <em>linear</em> store contradicts the non-linear recession a02 had measured, and substituted HBV-light with an argument.</li>
+<li><strong>a08 chose provable correctness over fidelity.</strong> Implementing SAC-SMA, it dropped a line from the original Fortran that destroys mass, because keeping it would have made the conservation invariants unprovable. It logged the deviation rather than hiding it.</li>
+</ul>
+</section>
+<section id="things-that-went-wrong" class="level2" data-number="5.2">
+<h2 data-number="5.2" class="anchored" data-anchor-id="things-that-went-wrong"><span class="header-section-number">5.2</span> Things that went wrong</h2>
+<ul>
+<li><strong>The evaluation window was initially wrong.</strong> An early translation of the brief’s calendar dates into row indices produced rows 265:1360 instead of 0:1095. Both windows contain exactly 1,003 metric days, which is why the error was not obvious. It was caught by cross-checking against the user’s earlier study and confirmed independently by PET seasonality and the USGS match (<code>ISSUE-001</code>).</li>
+<li><strong>Agents collided on shared files.</strong> Running five builders concurrently exposed that <code>backup.sh</code> and <code>state.py</code> were not safe under parallel use — concurrent git commits fight over <code>index.lock</code>, and a read-modify-write on <code>state.json</code> loses siblings’ updates. Both were made atomic. Two agents also filed <em>different</em> issues under the same number, which had to be renumbered.</li>
+<li><strong>A declared compute budget was never enforced.</strong> <code>config/optimization.yaml</code> specified a 90-minute cap for the LSTM search, but the runner never read that block: <code>study.optimize()</code> was called with no <code>timeout=</code>. The search ran over seven hours and produced nothing (<code>ISSUE-006</code>). It was replaced by a budgeted alternative agent that enforces its deadline <strong>in code</strong>, which finished the same experiment in 7.6 minutes. The lesson is general: <em>a limit that lives only in a configuration file is not a limit.</em></li>
+</ul>
+</section>
+<section id="the-headline-result-contradicted-the-design" class="level2" data-number="5.3">
+<h2 data-number="5.3" class="anchored" data-anchor-id="the-headline-result-contradicted-the-design"><span class="header-section-number">5.3</span> The headline result contradicted the design</h2>
+<p>The study was built around a complexity gradient — regression → GR4J → HBV → SAC-SMA → LSTM — to measure how much complexity buys. On the held-out window the answer was <strong>nothing</strong>: the 26-coefficient ridge regression achieved the highest NSE of any candidate, and the rank correlation between number of fitted quantities and KGE across the five models was <strong>−0.70</strong>.</p>
+<p>Because the hypothesis was pre-registered, that is reported as a falsification rather than quietly reframed. <a href="./03_models.html#sec-h1-risk">The H1-risk section</a> of the model report was written <em>after the models were built but before the held-out window was opened</em>, specifically so the inconvenient evidence could not be presented as though it had been expected all along.</p>
+</section>
+</section>
+<section id="sec-reading-order" class="level1" data-number="6">
+<h1 data-number="6"><span class="header-section-number">6</span> Reading order</h1>
+<table class="caption-top table">
+<thead>
+<tr class="header">
+<th>#</th>
+<th>Report</th>
+<th>What it establishes</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>01</td>
+<td><a href="./01_watershed.html">Watershed</a></td>
+<td>Where this basin is, how it behaves, what a good model must represent</td>
+</tr>
+<tr class="even">
+<td>02</td>
+<td><a href="./02_data.html">Data</a></td>
+<td>What the record contains, whether it can be trusted, what the periods really are</td>
+</tr>
+<tr class="odd">
+<td>03</td>
+<td><a href="./03_models.html">Models</a></td>
+<td>The five candidates, their equations, and the pre-registered hypotheses</td>
+</tr>
+<tr class="even">
+<td>04</td>
+<td><a href="./04_metrics.html">Metrics</a></td>
+<td>Why the calibration objective is 0.5·KGE + 0.5·NSE</td>
+</tr>
+<tr class="odd">
+<td>05</td>
+<td><a href="./05_implementation.html">Implementation &amp; calibration</a></td>
+<td>How the models were built, tested and fitted</td>
+</tr>
+<tr class="even">
+<td>10</td>
+<td><a href="./10_optimization.html">Optimization</a></td>
+<td>Which search algorithm each model gets, and why</td>
+</tr>
+<tr class="odd">
+<td>16</td>
+<td><a href="./16_evaluation.html">Evaluation</a></td>
+<td>The held-out result, the winner, and the hypothesis verdicts</td>
+</tr>
+</tbody>
+</table>
+</section>
+<section id="sec-repro" class="level1" data-number="7">
+<h1 data-number="7"><span class="header-section-number">7</span> Reproducing this</h1>
+<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb4"><pre class="sourceCode bash code-with-copy"><code class="sourceCode bash"><span id="cb4-1"><a href="#cb4-1" aria-hidden="true" tabindex="-1"></a><span class="fu">bash</span> scripts/setup_env.sh          <span class="co"># conda env `leafriver`</span></span>
+<span id="cb4-2"><a href="#cb4-2" aria-hidden="true" tabindex="-1"></a><span class="ex">conda</span> activate leafriver</span>
+<span id="cb4-3"><a href="#cb4-3" aria-hidden="true" tabindex="-1"></a><span class="ex">python</span> <span class="at">-m</span> pytest <span class="at">-q</span> tests          <span class="co"># 276 tests</span></span>
+<span id="cb4-4"><a href="#cb4-4" aria-hidden="true" tabindex="-1"></a><span class="ex">python</span> <span class="at">-m</span> src.optimization.runner <span class="at">--slot</span> 2 <span class="at">--seeds</span> 42-51 <span class="at">--stage</span> final</span>
+<span id="cb4-5"><a href="#cb4-5" aria-hidden="true" tabindex="-1"></a><span class="ex">quarto</span> render reports              <span class="co"># this site</span></span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<p>Everything is seeded (42), every period comes from <code>config/project.yaml</code>, and every agent’s work is recoverable from a git tag listed in its handoff.</p>
+<div class="cell" data-execution_count="2">
+<div id="tbl-runlog" class="cell quarto-float quarto-figure quarto-figure-center anchored" data-execution_count="2">
+<figure class="quarto-float quarto-float-tbl figure">
+<figcaption class="quarto-float-caption-top quarto-float-caption quarto-float-tbl" id="tbl-runlog-caption-0ceaefa1-69ba-4598-a22c-09a6ac19f8ca">
+Table&nbsp;1: Every agent that ran, with the backup tag its work is recoverable from.
+</figcaption>
+<div aria-describedby="tbl-runlog-caption-0ceaefa1-69ba-4598-a22c-09a6ac19f8ca">
+<div class="cell-output cell-output-display" data-execution_count="2">
+<div>
+
+
+<table class="dataframe cell caption-top table table-sm table-striped small" data-border="1">
+<thead>
+<tr class="header">
+<th data-quarto-table-cell-role="th"></th>
+<th data-quarto-table-cell-role="th">task</th>
+<th data-quarto-table-cell-role="th">status</th>
+<th data-quarto-table-cell-role="th">backup tag</th>
+</tr>
+<tr class="even">
+<th data-quarto-table-cell-role="th">agent</th>
+<th data-quarto-table-cell-role="th"></th>
+<th data-quarto-table-cell-role="th"></th>
+<th data-quarto-table-cell-role="th"></th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<th data-quarto-table-cell-role="th">a01</th>
+<td>watershed characterization</td>
+<td>done</td>
+<td>a01-watershed-characterizer-20260915-193727</td>
+</tr>
+<tr class="even">
+<th data-quarto-table-cell-role="th">a02</th>
+<td>data EDA &amp; QC</td>
+<td>done</td>
+<td>a02-data-analyst-20260915-193022</td>
+</tr>
+<tr class="odd">
+<th data-quarto-table-cell-role="th">a03</th>
+<td>model proposals</td>
+<td>done</td>
+<td>a03-model-proposer-20260915-194548</td>
+</tr>
+<tr class="even">
+<th data-quarto-table-cell-role="th">a04</th>
+<td>metrics &amp; objective</td>
+<td>done</td>
+<td>a04-metrics-advisor-20260916-055305</td>
+</tr>
+<tr class="odd">
+<th data-quarto-table-cell-role="th">a05</th>
+<td>slot 1 build</td>
+<td>done</td>
+<td>a05-model-builder-1-20260916-060237</td>
+</tr>
+<tr class="even">
+<th data-quarto-table-cell-role="th">a06</th>
+<td>slot 2 build</td>
+<td>done</td>
+<td>a06-model-builder-2-20260916-055855</td>
+</tr>
+<tr class="odd">
+<th data-quarto-table-cell-role="th">a07</th>
+<td>slot 3 build</td>
+<td>done</td>
+<td>a07-model-builder-3-20260916-055925</td>
+</tr>
+<tr class="even">
+<th data-quarto-table-cell-role="th">a08</th>
+<td>slot 4 build</td>
+<td>done</td>
+<td>a08-model-builder-4-20260916-101612</td>
+</tr>
+<tr class="odd">
+<th data-quarto-table-cell-role="th">a09</th>
+<td>slot 5 build</td>
+<td>done</td>
+<td>a09-model-builder-5-20260916-060945</td>
+</tr>
+<tr class="even">
+<th data-quarto-table-cell-role="th">a10</th>
+<td>optimization design</td>
+<td>done</td>
+<td>a10-optimization-advisor-20260916-100629</td>
+</tr>
+<tr class="odd">
+<th data-quarto-table-cell-role="th">a11</th>
+<td>slot 1 calibration</td>
+<td>done</td>
+<td>orchestrator-20260916-103322</td>
+</tr>
+<tr class="even">
+<th data-quarto-table-cell-role="th">a12</th>
+<td>slot 2 calibration</td>
+<td>done</td>
+<td>orchestrator-20260916-103322</td>
+</tr>
+<tr class="odd">
+<th data-quarto-table-cell-role="th">a13</th>
+<td>slot 3 calibration</td>
+<td>done</td>
+<td>orchestrator-20260916-103322</td>
+</tr>
+<tr class="even">
+<th data-quarto-table-cell-role="th">a14</th>
+<td>slot 4 calibration</td>
+<td>done</td>
+<td>orchestrator-20260916-103322</td>
+</tr>
+<tr class="odd">
+<th data-quarto-table-cell-role="th">a15b</th>
+<td>slot 5 calibration (budgeted)</td>
+<td>done</td>
+<td>a15b-optimizer-5-fast-20260916-171610</td>
+</tr>
+<tr class="even">
+<th data-quarto-table-cell-role="th">a16</th>
+<td>held-out evaluation</td>
+<td>done</td>
+<td>a16-evaluator-20260916-172743</td>
+</tr>
+</tbody>
+</table>
+
+</div>
+</div>
+</div>
+</figure>
+</div>
+</div>
+
+
+</section>
+
+</main> <!-- /main -->
+<script id="quarto-html-after-body" type="application/javascript">
+  window.document.addEventListener("DOMContentLoaded", function (event) {
+    const icon = "";
+    const anchorJS = new window.AnchorJS();
+    anchorJS.options = {
+      placement: 'right',
+      icon: icon
+    };
+    anchorJS.add('.anchored');
+    const isCodeAnnotation = (el) => {
+      for (const clz of el.classList) {
+        if (clz.startsWith('code-annotation-')) {                     
+          return true;
+        }
+      }
+      return false;
+    }
+    const onCopySuccess = function(e) {
+      // button target
+      const button = e.trigger;
+      // don't keep focus
+      button.blur();
+      // flash "checked"
+      button.classList.add('code-copy-button-checked');
+      var currentTitle = button.getAttribute("title");
+      button.setAttribute("title", "Copied!");
+      let tooltip;
+      if (window.bootstrap) {
+        button.setAttribute("data-bs-toggle", "tooltip");
+        button.setAttribute("data-bs-placement", "left");
+        button.setAttribute("data-bs-title", "Copied!");
+        tooltip = new bootstrap.Tooltip(button, 
+          { trigger: "manual", 
+            customClass: "code-copy-button-tooltip",
+            offset: [0, -8]});
+        tooltip.show();    
+      }
+      setTimeout(function() {
+        if (tooltip) {
+          tooltip.hide();
+          button.removeAttribute("data-bs-title");
+          button.removeAttribute("data-bs-toggle");
+          button.removeAttribute("data-bs-placement");
+        }
+        button.setAttribute("title", currentTitle);
+        button.classList.remove('code-copy-button-checked');
+      }, 1000);
+      // clear code selection
+      e.clearSelection();
+    }
+    const getTextToCopy = function(trigger) {
+      const outerScaffold = trigger.parentElement.cloneNode(true);
+      const codeEl = outerScaffold.querySelector('code');
+      for (const childEl of codeEl.children) {
+        if (isCodeAnnotation(childEl)) {
+          childEl.remove();
+        }
+      }
+      return codeEl.innerText;
+    }
+    const clipboard = new window.ClipboardJS('.code-copy-button:not([data-in-quarto-modal])', {
+      text: getTextToCopy
+    });
+    clipboard.on('success', onCopySuccess);
+    if (window.document.getElementById('quarto-embedded-source-code-modal')) {
+      const clipboardModal = new window.ClipboardJS('.code-copy-button[data-in-quarto-modal]', {
+        text: getTextToCopy,
+        container: window.document.getElementById('quarto-embedded-source-code-modal')
+      });
+      clipboardModal.on('success', onCopySuccess);
+    }
+      var localhostRegex = new RegExp(/^(?:http|https):\/\/localhost\:?[0-9]*\//);
+      var mailtoRegex = new RegExp(/^mailto:/);
+        var filterRegex = new RegExp('/' + window.location.host + '/');
+      var isInternal = (href) => {
+          return filterRegex.test(href) || localhostRegex.test(href) || mailtoRegex.test(href);
+      }
+      // Inspect non-navigation links and adorn them if external
+     var links = window.document.querySelectorAll('a[href]:not(.nav-link):not(.navbar-brand):not(.toc-action):not(.sidebar-link):not(.sidebar-item-toggle):not(.pagination-link):not(.no-external):not([aria-hidden]):not(.dropdown-item):not(.quarto-navigation-tool):not(.about-link)');
+      for (var i=0; i<links.length; i++) {
+        const link = links[i];
+        if (!isInternal(link.href)) {
+          // undo the damage that might have been done by quarto-nav.js in the case of
+          // links that we want to consider external
+          if (link.dataset.originalHref !== undefined) {
+            link.href = link.dataset.originalHref;
+          }
+        }
+      }
+    function tippyHover(el, contentFn, onTriggerFn, onUntriggerFn) {
+      const config = {
+        allowHTML: true,
+        maxWidth: 500,
+        delay: 100,
+        arrow: false,
+        appendTo: function(el) {
+            return el.parentElement;
+        },
+        interactive: true,
+        interactiveBorder: 10,
+        theme: 'quarto',
+        placement: 'bottom-start',
+      };
+      if (contentFn) {
+        config.content = contentFn;
+      }
+      if (onTriggerFn) {
+        config.onTrigger = onTriggerFn;
+      }
+      if (onUntriggerFn) {
+        config.onUntrigger = onUntriggerFn;
+      }
+      window.tippy(el, config); 
+    }
+    const noterefs = window.document.querySelectorAll('a[role="doc-noteref"]');
+    for (var i=0; i<noterefs.length; i++) {
+      const ref = noterefs[i];
+      tippyHover(ref, function() {
+        // use id or data attribute instead here
+        let href = ref.getAttribute('data-footnote-href') || ref.getAttribute('href');
+        try { href = new URL(href).hash; } catch {}
+        const id = href.replace(/^#\/?/, "");
+        const note = window.document.getElementById(id);
+        if (note) {
+          return note.innerHTML;
+        } else {
+          return "";
+        }
+      });
+    }
+    const xrefs = window.document.querySelectorAll('a.quarto-xref');
+    const processXRef = (id, note) => {
+      // Strip column container classes
+      const stripColumnClz = (el) => {
+        el.classList.remove("page-full", "page-columns");
+        if (el.children) {
+          for (const child of el.children) {
+            stripColumnClz(child);
+          }
+        }
+      }
+      stripColumnClz(note)
+      if (id === null || id.startsWith('sec-')) {
+        // Special case sections, only their first couple elements
+        const container = document.createElement("div");
+        if (note.children && note.children.length > 2) {
+          container.appendChild(note.children[0].cloneNode(true));
+          for (let i = 1; i < note.children.length; i++) {
+            const child = note.children[i];
+            if (child.tagName === "P" && child.innerText === "") {
+              continue;
+            } else {
+              container.appendChild(child.cloneNode(true));
+              break;
+            }
+          }
+          if (window.Quarto?.typesetMath) {
+            window.Quarto.typesetMath(container);
+          }
+          return container.innerHTML
+        } else {
+          if (window.Quarto?.typesetMath) {
+            window.Quarto.typesetMath(note);
+          }
+          return note.innerHTML;
+        }
+      } else {
+        // Remove any anchor links if they are present
+        const anchorLink = note.querySelector('a.anchorjs-link');
+        if (anchorLink) {
+          anchorLink.remove();
+        }
+        if (window.Quarto?.typesetMath) {
+          window.Quarto.typesetMath(note);
+        }
+        if (note.classList.contains("callout")) {
+          return note.outerHTML;
+        } else {
+          return note.innerHTML;
+        }
+      }
+    }
+    for (var i=0; i<xrefs.length; i++) {
+      const xref = xrefs[i];
+      tippyHover(xref, undefined, function(instance) {
+        instance.disable();
+        let url = xref.getAttribute('href');
+        let hash = undefined; 
+        if (url.startsWith('#')) {
+          hash = url;
+        } else {
+          try { hash = new URL(url).hash; } catch {}
+        }
+        if (hash) {
+          const id = hash.replace(/^#\/?/, "");
+          const note = window.document.getElementById(id);
+          if (note !== null) {
+            try {
+              const html = processXRef(id, note.cloneNode(true));
+              instance.setContent(html);
+            } finally {
+              instance.enable();
+              instance.show();
+            }
+          } else {
+            // See if we can fetch this
+            fetch(url.split('#')[0])
+            .then(res => res.text())
+            .then(html => {
+              const parser = new DOMParser();
+              const htmlDoc = parser.parseFromString(html, "text/html");
+              const note = htmlDoc.getElementById(id);
+              if (note !== null) {
+                const html = processXRef(id, note);
+                instance.setContent(html);
+              } 
+            }).finally(() => {
+              instance.enable();
+              instance.show();
+            });
+          }
+        } else {
+          // See if we can fetch a full url (with no hash to target)
+          // This is a special case and we should probably do some content thinning / targeting
+          fetch(url)
+          .then(res => res.text())
+          .then(html => {
+            const parser = new DOMParser();
+            const htmlDoc = parser.parseFromString(html, "text/html");
+            const note = htmlDoc.querySelector('main.content');
+            if (note !== null) {
+              // This should only happen for chapter cross references
+              // (since there is no id in the URL)
+              // remove the first header
+              if (note.children.length > 0 && note.children[0].tagName === "HEADER") {
+                note.children[0].remove();
+              }
+              const html = processXRef(null, note);
+              instance.setContent(html);
+            } 
+          }).finally(() => {
+            instance.enable();
+            instance.show();
+          });
+        }
+      }, function(instance) {
+      });
+    }
+        let selectedAnnoteEl;
+        const selectorForAnnotation = ( cell, annotation) => {
+          let cellAttr = 'data-code-cell="' + cell + '"';
+          let lineAttr = 'data-code-annotation="' +  annotation + '"';
+          const selector = 'span[' + cellAttr + '][' + lineAttr + ']';
+          return selector;
+        }
+        const selectCodeLines = (annoteEl) => {
+          const doc = window.document;
+          const targetCell = annoteEl.getAttribute("data-target-cell");
+          const targetAnnotation = annoteEl.getAttribute("data-target-annotation");
+          const annoteSpan = window.document.querySelector(selectorForAnnotation(targetCell, targetAnnotation));
+          const lines = annoteSpan.getAttribute("data-code-lines").split(",");
+          const lineIds = lines.map((line) => {
+            return targetCell + "-" + line;
+          })
+          let top = null;
+          let height = null;
+          let parent = null;
+          if (lineIds.length > 0) {
+              //compute the position of the single el (top and bottom and make a div)
+              const el = window.document.getElementById(lineIds[0]);
+              top = el.offsetTop;
+              height = el.offsetHeight;
+              parent = el.parentElement.parentElement;
+            if (lineIds.length > 1) {
+              const lastEl = window.document.getElementById(lineIds[lineIds.length - 1]);
+              const bottom = lastEl.offsetTop + lastEl.offsetHeight;
+              height = bottom - top;
+            }
+            if (top !== null && height !== null && parent !== null) {
+              // cook up a div (if necessary) and position it 
+              let div = window.document.getElementById("code-annotation-line-highlight");
+              if (div === null) {
+                div = window.document.createElement("div");
+                div.setAttribute("id", "code-annotation-line-highlight");
+                div.style.position = 'absolute';
+                parent.appendChild(div);
+              }
+              div.style.top = top - 2 + "px";
+              div.style.height = height + 4 + "px";
+              div.style.left = 0;
+              let gutterDiv = window.document.getElementById("code-annotation-line-highlight-gutter");
+              if (gutterDiv === null) {
+                gutterDiv = window.document.createElement("div");
+                gutterDiv.setAttribute("id", "code-annotation-line-highlight-gutter");
+                gutterDiv.style.position = 'absolute';
+                const codeCell = window.document.getElementById(targetCell);
+                const gutter = codeCell.querySelector('.code-annotation-gutter');
+                gutter.appendChild(gutterDiv);
+              }
+              gutterDiv.style.top = top - 2 + "px";
+              gutterDiv.style.height = height + 4 + "px";
+            }
+            selectedAnnoteEl = annoteEl;
+          }
+        };
+        const unselectCodeLines = () => {
+          const elementsIds = ["code-annotation-line-highlight", "code-annotation-line-highlight-gutter"];
+          elementsIds.forEach((elId) => {
+            const div = window.document.getElementById(elId);
+            if (div) {
+              div.remove();
+            }
+          });
+          selectedAnnoteEl = undefined;
+        };
+          // Handle positioning of the toggle
+      window.addEventListener(
+        "resize",
+        throttle(() => {
+          elRect = undefined;
+          if (selectedAnnoteEl) {
+            selectCodeLines(selectedAnnoteEl);
+          }
+        }, 10)
+      );
+      function throttle(fn, ms) {
+      let throttle = false;
+      let timer;
+        return (...args) => {
+          if(!throttle) { // first call gets through
+              fn.apply(this, args);
+              throttle = true;
+          } else { // all the others get throttled
+              if(timer) clearTimeout(timer); // cancel #2
+              timer = setTimeout(() => {
+                fn.apply(this, args);
+                timer = throttle = false;
+              }, ms);
+          }
+        };
+      }
+        // Attach click handler to the DT
+        const annoteDls = window.document.querySelectorAll('dt[data-target-cell]');
+        for (const annoteDlNode of annoteDls) {
+          annoteDlNode.addEventListener('click', (event) => {
+            const clickedEl = event.target;
+            if (clickedEl !== selectedAnnoteEl) {
+              unselectCodeLines();
+              const activeEl = window.document.querySelector('dt[data-target-cell].code-annotation-active');
+              if (activeEl) {
+                activeEl.classList.remove('code-annotation-active');
+              }
+              selectCodeLines(clickedEl);
+              clickedEl.classList.add('code-annotation-active');
+            } else {
+              // Unselect the line
+              unselectCodeLines();
+              clickedEl.classList.remove('code-annotation-active');
+            }
+          });
+        }
+    const findCites = (el) => {
+      const parentEl = el.parentElement;
+      if (parentEl) {
+        const cites = parentEl.dataset.cites;
+        if (cites) {
+          return {
+            el,
+            cites: cites.split(' ')
+          };
+        } else {
+          return findCites(el.parentElement)
+        }
+      } else {
+        return undefined;
+      }
+    };
+    var bibliorefs = window.document.querySelectorAll('a[role="doc-biblioref"]');
+    for (var i=0; i<bibliorefs.length; i++) {
+      const ref = bibliorefs[i];
+      const citeInfo = findCites(ref);
+      if (citeInfo) {
+        tippyHover(citeInfo.el, function() {
+          var popup = window.document.createElement('div');
+          citeInfo.cites.forEach(function(cite) {
+            var citeDiv = window.document.createElement('div');
+            citeDiv.classList.add('hanging-indent');
+            citeDiv.classList.add('csl-entry');
+            var biblioDiv = window.document.getElementById('ref-' + cite);
+            if (biblioDiv) {
+              citeDiv.innerHTML = biblioDiv.innerHTML;
+            }
+            popup.appendChild(citeDiv);
+          });
+          return popup.innerHTML;
+        });
+      }
+    }
+  });
+  </script>
+</div> <!-- /content -->
+
+
+
+
+</body></html>

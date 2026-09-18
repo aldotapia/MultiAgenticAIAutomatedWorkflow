@@ -1,0 +1,1467 @@
+---
+title: "Five candidate models for daily streamflow of the Leaf River"
+subtitle: "Agent 3 (a03-model-proposer) — phase P2: model design specification"
+author: "a03-model-proposer"
+date: 2026-09-15
+jupyter: leafriver
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    number-sections: true
+    code-fold: true
+    fig-dpi: 150
+    df-print: kable
+bibliography: references.bib
+---
+
+```{python}
+#| label: setup
+#| code-fold: true
+import os, sys, json, time, math, warnings
+from pathlib import Path
+
+ROOT = Path.cwd()
+while not (ROOT / "config" / "project.yaml").exists():
+    ROOT = ROOT.parent
+sys.path.insert(0, str(ROOT)); os.chdir(ROOT)
+
+import numpy as np, pandas as pd, yaml
+import matplotlib as mpl, matplotlib.pyplot as plt
+import seaborn as sns
+warnings.filterwarnings("ignore")
+
+from src.common.data import load_data, load_config, slice_run, metric_mask, internal_mask
+from src.common.metrics import nse, kge_components
+
+CFG  = load_config()
+SEED = CFG["reproducibility"]["random_seed"]
+np.random.seed(SEED)
+FIG  = ROOT / "results" / "figures"; FIG.mkdir(parents=True, exist_ok=True)
+sns.set_theme(style="whitegrid", context="notebook")
+MODELS = yaml.safe_load(open(ROOT / "config" / "models.yaml"))
+
+def show(df, **kw):
+    return df.style.hide(axis="index").format(precision=3, **kw) if hasattr(df, "style") else df
+```
+
+# Purpose and scope {#sec-purpose}
+
+This report selects and **fully specifies** the five models that agents a05–a09 will implement and
+a11–a15 will calibrate. It is written so that a builder can code its slot from
+`config/models.yaml` plus the corresponding section here *without reading any other document*.
+
+Three requirements drive every choice:
+
+1. **Maximise the chance of the best possible reproduction of daily $Q$.** Independent benchmarks *at this
+   exact gauge* (USGS 02472000) put calibrated conceptual models at NSE 0.69–0.82 (SAC-SMA 0.796,
+   HBV 0.819, FUSE 0.775–0.779, VIC 0.72, mHM 0.70) and regional LSTMs at NSE 0.84–0.86 [@kratzert2019].
+   Our target band is therefore **NSE 0.80–0.87 on calibration and 0.74–0.85 on evaluation**.
+2. **Span a complexity gradient** so that the study can answer *does complexity pay off?*
+3. **Be complementary**, because a16 also evaluates the ensembles pre-declared in
+   `config/models.yaml → ensembles:` (@sec-ensembles).
+
+Everything below is constrained by CLAUDE.md rule 3: **no statistic of observed $Q$ inside
+1948-10-01…1951-09-30 may influence any model choice, feature, bound or scaling constant.**
+All numbers quoted from data in this report come from the *calibration* window only.
+
+# The evidence base: what this basin demands of a model {#sec-evidence}
+
+@tbl-constraints translates the a01/a02 findings into hard structural requirements. The right-hand
+column is the specification that every slot is checked against in @sec-crosscompare.
+
+```{python}
+#| label: tbl-constraints
+#| tbl-cap: "Basin evidence (a01, a02) translated into model-structure requirements. All numbers refer to the calibration window or to whole-record EDA, never to the evaluation window."
+rows = [
+ ("Water balance", "P 1432, PET 1062, Q 500 mm/yr; runoff ratio 0.35; aridity 0.74; E/P 0.65 (~0.07 above Budyko)",
+  "a01/a02", "AET must be able to reach PET; a store large enough to buffer 1 yr"),
+ ("Runoff generation", "Dunne 5.1 % + Horton 7.1 % ⇒ ~88 % subsurface; event runoff coefficients 0.004–0.454, r(RC, antecedent Q)=0.57, r(RC, event P)=0.60",
+  "a01/a02", "Non-linear, storage-dependent (saturation-excess / PDM / tension-free) runoff generation; NOT a fixed runoff coefficient"),
+ ("Recession", "Brutsaert–Nieber b = 1.68; master recession k = 0.896–0.915 d⁻¹ (τ = 9.1–11.3 d); GAGES-II subsurface contact time 549 d",
+  "a01/a02", "Non-linear storage–discharge OR ≥ 2 parallel linear stores with τ ≈ 10 d and τ ≥ 100 d"),
+ ("Baseflow", "BFI 0.30–0.41 (Lyne–Hollick 0.41); log-Q ACF e-folding 48 d; Q never zero (min 0.069 mm/d)",
+  "a02", "A slow store that never empties; no zero-flow handling needed"),
+ ("Routing", "response onset lag 1 d; P→Q cross-correlation peak 3 d; t_c 1.4 d; main stem 108.7 km",
+  "a01/a02", "Unit hydrograph or Nash cascade with mean lag 1–3 d"),
+ ("Seasonality", "monthly Q 11–87 mm vs monthly P 81–152 mm; 48/50 annual peaks in Dec–May; PET not climatological (only 53 % of variance seasonal)",
+  "a01/a02", "Seasonality must emerge from the PET forcing + storage, not from a prescribed seasonal function"),
+ ("Snow", "0.8 % of P; 23 mm snowfall/yr (0.15 % as SWE)", "a01", "NO snow module (a01 decision, DECISIONS.md)"),
+ ("Regulation", "GAGES-II 'Ref'; 0 major dams; 4.0 mm storage = 0.8 % of annual runoff", "a01", "NO reservoir/abstraction routine"),
+ ("Data length", "13,149 calibration metric days (36 WY); Sorooshian et al. (1993) needed ~8 yr for stable SAC-SMA parameters",
+  "a02/a01", "Up to ~16 conceptual parameters are supportable; an LSTM is at the lower end of its comfort zone → regularise"),
+ ("Distribution", "skew 6.85, kurtosis 76.6; wettest 1 % of days carry 16 %, wettest 5 % carry 40 % of volume",
+  "a02", "Squared-error calibration is dominated by ~20 flood days/yr → favour robust structures, consider a log-space loss term"),
+ ("Evaluation regime", "eval/cal mean-Q ratio 1.29, runoff ratio 0.41 vs 0.35, but eval max 45.9 < cal max 64.0 mm/d",
+  "a02", "No magnitude extrapolation, but a high-flow-chasing calibration will be punished → prefer robustness"),
+ ("Warm-up available at evaluation", "only 92 d (1948-10-01–1948-12-31) before the metric window",
+  "a01", "Initial states must be parameter-derived (never observation-derived) and physically sensible"),
+]
+tbl = pd.DataFrame(rows, columns=["Aspect", "Evidence (number, unit, period)", "Source", "Requirement on the model"])
+tbl
+```
+
+::: {.callout-important}
+## Two slow stores, not one
+a01 reports a master-recession residence time of 9–11 d while the GAGES-II subsurface *contact time* is
+549 d, and a02 finds a Brutsaert–Nieber exponent $b = 1.68 \ne 1$. A single linear groundwater reservoir
+cannot reconcile those two numbers. Every conceptual slot below therefore contains **either** a non-linear
+storage–discharge relation (GR4J routing store, $Q \propto R^5$) **or** two lower-zone outlets with
+different time constants (HBV `SUZ`/`SLZ`, SAC-SMA `LZFSC`/`LZFPC`). This is the single most important
+structural conclusion of @sec-evidence.
+:::
+
+# Selection method {#sec-selection}
+
+## Criteria and weights
+
+Each candidate is scored 1–5 (5 = best) on seven criteria; the weighted total drives the portfolio.
+Weights reflect the project objective ("best reproduction of daily streamflow", KGE/NSE on a 1003-day
+window) and the hard laptop compute budget (≤ 3 h per optimizer, $10^4$–$10^5$ model runs).
+
+```{python}
+#| label: tbl-criteria
+#| tbl-cap: "Scoring criteria and weights."
+crit = pd.DataFrame([
+ ("Process adequacy", 0.25, "Does the structure contain the processes required by the evidence table in Sec. 2?"),
+ ("Data demands",     0.10, "Can it run on P and PET alone (no T, no radiation, no topographic index)?"),
+ ("Parameters vs data", 0.10, "Free parameters against 13,149 calibration days; identifiability."),
+ ("Leaf River / CONUS evidence", 0.15, "Documented performance at 02472000 or on comparable humid basins."),
+ ("Implementation risk", 0.15, "Risk that an independent builder codes it wrong in one session."),
+ ("Complementarity",   0.15, "Does it add an error structure the rest of the portfolio lacks?"),
+ ("Compute cost",      0.10, "Cost of 1e4-1e5 runs / one training within 3 h on a laptop (5 = cheap)."),
+], columns=["Criterion", "Weight", "Meaning"])
+crit
+```
+
+## Candidate pool and scores
+
+```{python}
+#| label: fig-scores
+#| fig-cap: "Weighted screening of the candidate pool. Rows are sorted by weighted total; the five selected structures are labelled with their slot number. Scores are the author's expert judgement, anchored on the evidence in @sec-evidence and the at-gauge benchmarks of a01."
+cols = ["Process", "DataDem", "Par/Data", "Evidence", "ImplRisk", "Complem", "Compute"]
+w = np.array([0.25, 0.10, 0.10, 0.15, 0.15, 0.15, 0.10])
+cand = {
+ # name                         Proc Data Par  Evid Impl Comp Cost
+ "Climatological seasonal mean": [1,  5,   5,   2,   5,   2,   5],
+ "ARX / API ridge regression":   [2,  5,   4,   3,   5,   5,   5],
+ "IHACRES (UH + non-linear loss)":[3, 5,   4,   3,   4,   3,   5],
+ "abc model (3 par)":            [2,  5,   5,   2,   5,   2,   5],
+ "GR4J (4 par)":                 [4,  5,   5,   5,   5,   4,   5],
+ "HYMOD (5 par)":                [3,  5,   5,   4,   5,   2,   5],
+ "HBV-light, no snow (9 par)":   [5,  5,   4,   5,   4,   4,   5],
+ "Xinanjiang (~13 par)":         [4,  5,   3,   3,   3,   3,   4],
+ "PDM (~7 par)":                 [4,  5,   4,   3,   4,   2,   5],
+ "TOPMODEL (~6 par)":            [3,  2,   4,   2,   3,   3,   4],
+ "SAC-SMA (15 par, no Snow-17)": [5,  5,   3,   5,   3,   5,   4],
+ "FUSE / MARRMoT structure":     [4,  5,   3,   4,   2,   3,   4],
+ "Gradient boosting + features": [2,  4,   3,   3,   4,   4,   5],
+ "GRU / TCN":                    [3,  4,   2,   3,   3,   3,   3],
+ "LSTM, single basin":           [4,  4,   2,   5,   4,   5,   3],
+ "dPL hybrid (differentiable)":  [5,  4,   2,   4,   1,   5,   2],
+ "Conceptual + LSTM residual":   [4,  4,   2,   4,   2,   4,   3],
+}
+S = pd.DataFrame(cand, index=cols).T
+S["Weighted total"] = (S[cols].values * w).sum(axis=1)
+S = S.sort_values("Weighted total", ascending=False)
+slots = {"ARX / API ridge regression": 1, "GR4J (4 par)": 2, "HBV-light, no snow (9 par)": 3,
+         "SAC-SMA (15 par, no Snow-17)": 4, "LSTM, single basin": 5}
+lab = [f"{i}  [slot {slots[i]}]" if i in slots else i for i in S.index]
+
+fig, ax = plt.subplots(figsize=(9.5, 7))
+sns.heatmap(S[cols], annot=True, fmt=".0f", cmap="YlGnBu", vmin=1, vmax=5,
+            cbar_kws={"label": "score (5 = best)"}, ax=ax, linewidths=.5)
+ax.set_yticklabels(lab, rotation=0)
+for j, (i, v) in enumerate(S["Weighted total"].items()):
+    ax.text(len(cols) + 0.15, j + 0.5, f"{v:.2f}", va="center", fontweight="bold" if i in slots else "normal")
+ax.text(len(cols) + 0.15, -0.3, "total", fontweight="bold")
+ax.set_title("Candidate screening (weights: 0.25/0.10/0.10/0.15/0.15/0.15/0.10)")
+plt.tight_layout(); plt.savefig(FIG / "a03_selection_scores.png", dpi=150, bbox_inches="tight"); plt.show()
+S[["Weighted total"]].round(3)
+```
+
+## Why these five, and what was rejected {#sec-why}
+
+**Selected:** ARX–API ridge (slot 1), GR4J (2), HBV-light without snow (3), SAC-SMA without Snow-17 (4),
+single-basin LSTM (5).
+
+The screening is **not** a pure ranking exercise: slot 1 is included *by design* even though HYMOD
+scores marginally higher (3.90 vs 3.84). A statistical lower benchmark is mandatory for the project's
+central question ("does complexity pay off?") — without it the gradient has no origin — and its low
+process score is precisely the point. Everything above slot 1 in the screening that is *not* selected is
+rejected for the reasons below.
+
+Rejections and overrides, with reasons:
+
+* **HYMOD is not used, although it is the historical Leaf River model** [@boyle2001; @vrugt2003].
+  The skill's default set proposes it; I override it and log the decision. HYMOD routes its slow response
+  through a *single linear* reservoir, which is exactly the structure a02 falsifies
+  ($b = 1.68 \ne 1$, and 9-d vs 549-d time scales). Its production store is a Moore PDM
+  [@moore1985], i.e. conceptually the same variable-contributing-area idea already carried by GR4J's
+  production store and HBV's $\beta$ function, so it would add little complementarity at 5 parameters —
+  a slot almost identical in complexity to GR4J's 4. Replacing it with **HBV-light** buys (i) an explicit
+  threshold `UZL` in the fast response, (ii) two subsurface time scales, (iii) the best documented
+  at-gauge conceptual score (NSE 0.819, a01), and (iv) it fills the complexity gap between 4 and 15
+  parameters. The historical Leaf River lineage is preserved through SAC-SMA, which is the model of
+  @duan1992, @sorooshian1993 and @boyle2001 on this very record.
+* **TOPMODEL** requires a topographic-index distribution; a01 only provides a single GAGES-II TWI value
+  (12.69), so the index histogram would have to be invented. Rejected on data demands.
+* **Xinanjiang / PDM / FUSE / MARRMoT** score well on process but add nothing that SAC-SMA + HBV do not
+  already cover, and FUSE/MARRMoT would mean porting a framework (high implementation risk in one session).
+* **Gradient boosting / GRU / TCN**: a tree ensemble cannot carry state, so it needs the same hand-made
+  antecedent features as slot 1 while losing the closed-form transparency; GRU/TCN are near-duplicates of
+  the LSTM with less hydrological literature. Rejected on complementarity.
+* **dPL / differentiable hybrid** [@feng2022] scores highest on process and complementarity but has the
+  worst implementation risk (a torch time-stepping loop with smoothed thresholds, trained jointly with a
+  network, written blind by one agent in one session) and the worst compute score. **The hybrid idea is
+  not lost**: it re-enters as the pre-declared ensembles `ens_physics_plus_ml` and
+  `ens_best_conceptual_plus_lstm` (@sec-ensembles), which a16 evaluates with weights fixed on
+  calibration data only — the same scientific question at a fraction of the risk.
+
+## The resulting complexity gradient
+
+```{python}
+#| label: fig-gradient
+#| fig-cap: "The five slots on a complexity axis. x = number of quantities fitted to data (log scale); y = expected NSE band on the calibration metric window as declared in config/models.yaml. Horizontal grey bands are the independent at-gauge benchmarks reported by a01 (Kratzert et al. 2019; NWM v2.1)."
+info = []
+for m in MODELS["models"]:
+    info.append(dict(slot=m["slot"], id=m["id"], family=m["family"], kind=m["kind"],
+                     npar=len(m["parameters"]),
+                     nse_lo=m["expected_performance"]["NSE_calibration"][0],
+                     nse_hi=m["expected_performance"]["NSE_calibration"][1]))
+info = pd.DataFrame(info)
+# number of fitted quantities (parameters + coefficients/weights)
+info["n_fitted"] = [28, 4, 9, 15, 4*64*(14+64) + 4*64 + 65]   # LSTM: 4H(n_in+H)+4H gates + head
+fig, ax = plt.subplots(figsize=(9, 4.6))
+for lo, hi, lbl, c in [(0.69, 0.82, "conceptual benchmarks at 02472000", "0.85"),
+                       (0.84, 0.86, "regional LSTM at 02472000", "0.75")]:
+    ax.axhspan(lo, hi, color=c, alpha=.6, zorder=0)
+    ax.text(120, hi + 0.004, lbl, fontsize=8, color="0.25")
+for _, r in info.iterrows():
+    ax.plot([r.n_fitted, r.n_fitted], [r.nse_lo, r.nse_hi], lw=6, solid_capstyle="round", alpha=.85)
+    ax.annotate(f"slot {r.slot}\n{r.id}", (r.n_fitted, r.nse_hi), textcoords="offset points",
+                xytext=(0, 8), ha="center", fontsize=8.5)
+ax.set_xscale("log"); ax.set_xlabel("number of quantities fitted to data (log scale)")
+ax.set_ylabel("expected NSE, calibration metric window"); ax.set_ylim(0.55, 0.96)
+ax.set_title("Complexity gradient of the five slots")
+plt.tight_layout(); plt.savefig(FIG / "a03_complexity_gradient.png", dpi=150, bbox_inches="tight"); plt.show()
+info[["slot", "id", "family", "kind", "npar", "n_fitted", "nse_lo", "nse_hi"]]
+```
+
+The LSTM count is $4H(n_{\text{in}}+H) + 4H + (H+1)$ weights with $H = 64$, $n_{\text{in}} = 14$:
+**`{python} int(4*64*(14+64) + 4*64 + 65)`** trainable weights against 10,592 training days — roughly
+**1.9 weights per training day**, which is why heavy regularisation (dropout 0.4, early stopping,
+5-seed averaging) is prescribed in @sec-model5.
+
+# Portfolio summary {#sec-summary}
+
+```{python}
+#| label: tbl-summary
+#| tbl-cap: "The five slots. 'Fitted' = free parameters (conceptual) or hyperparameters + fitted coefficients/weights (trainable)."
+summ = pd.DataFrame([
+ (1, "arx_api_ridge", "statistical", "trainable", "7 hyperpar. + 21 coeff.", "from scratch (numpy/scipy)",
+  "Lower benchmark. Non-linear antecedent-wetness features mapped linearly to a Box-Cox target. Answers: how much of daily Q is pure input memory?"),
+ (2, "gr4j", "conceptual_lumped", "conceptual", "4", "from scratch, Perrin et al. (2003); airGR oracle",
+  "Parsimony benchmark. One production store, one NON-LINEAR routing store (Q~R^5) and two unit hydrographs; the exchange term x2 tests the water-balance closure."),
+ (3, "hbv_light", "conceptual_lumped", "conceptual", "9", "from scratch, Seibert & Vis (2012)",
+  "Mid complexity. Threshold fast outlet (UZL/K0) + two subsurface time scales (K1, K2); best documented conceptual score at this gauge (NSE 0.819)."),
+ (4, "sacsma", "conceptual_lumped", "conceptual", "15", "from scratch, Burnash et al. (1973); numba",
+  "Process-rich upper bound. Tension/free water split in both zones, variable contributing area (ADIMP), demand-driven percolation, two baseflow stores. The historical Leaf River / SCE-UA model."),
+ (5, "lstm_seq2seq", "data_driven", "trainable", "10 hyperpar. + ~2e4 weights", "pytorch 2.13.0",
+  "Data-driven upper bound and the only non-conceptual error structure; sequence-to-sequence with warm-up masking so it also works with the 92-day evaluation warm-up."),
+], columns=["Slot", "id", "Family", "kind", "Fitted", "Source", "Role / rationale"])
+summ
+```
+
+# Slot 1 — ARX–API ridge regression {#sec-model1}
+
+## Overview
+
+A **persistence-free linear model**: the predictors are non-linear functions of the *forcing only*
+($P$, $PET$, day of year); no observed or simulated $Q$ enters the right-hand side, so the comparison with
+the conceptual slots is fair (a catchment model also only sees $P$ and $PET$). The two ideas that lift it
+above a naive regression are (i) **antecedent precipitation indices** (API), the oldest storage proxy in
+hydrology and the backbone of IHACRES-type models [@jakeman1993], and (ii) a **Box–Cox target transform**
+[@box1964] with a bias-corrected back-transform [@duan1983], which handles the extreme skew of daily $Q$
+(a02: skew 6.85). Estimation is ridge regression [@hoerl1970], i.e. closed form, so one model evaluation
+costs one $\sim 22 \times 22$ linear solve.
+
+**Why for the Leaf River.** a02 shows that the $R^2$ of a linear model on lagged $P$ rises monotonically
+with the lag window (0.59 at 10 d → 0.65 at 365 d): most of the daily signal *is* input memory. This slot
+quantifies exactly how much, and thereby prices the conceptual structure of slots 2–4.
+
+## Conceptual diagram
+
+```{mermaid}
+flowchart LR
+  P[P_t] --> L["lagged rain<br/>P_t .. P_t-n"]
+  P --> AF["A_fast = λf·A + P"]
+  P --> AM["A_med = λm·A + P"]
+  P --> AS["A_slow = λs·A + P"]
+  E[PET_t] --> EA["E_ant = λe·E + PET"]
+  D[day of year] --> H["4 harmonics"]
+  L --> X[["design matrix Z<br/>(standardised)"]]
+  AF --> X
+  AM --> X
+  AS --> X
+  EA --> X
+  H --> X
+  AM -.->|"interaction P·A"| X
+  X --> R["ridge<br/>β = (ZᵀZ+αnI')⁻¹Zᵀy"]
+  R --> Y["ŷ = Zβ (Box-Cox space)"]
+  Y --> B["inverse Box-Cox<br/>× bias factor c"]
+  B --> Q[["Q̂_t (mm/d)"]]
+```
+
+## Perceptual → conceptual assumptions
+
+*Represented*: catchment wetness memory at three time scales; a variable runoff coefficient through the
+$P_t \times A_t$ interaction terms; the drying effect of accumulated PET; residual seasonality.
+*Ignored*: mass conservation (nothing forces $\sum \hat Q \le \sum P$ except the bias factor), explicit
+states, threshold behaviour beyond the quadratic/interaction terms, and any non-stationarity.
+
+## Mathematical formulation
+
+Recursive feature states, computed forward over the contiguous forcing frame with zero initial values:
+
+$$A^{(j)}_t = \lambda_j\,A^{(j)}_{t-1} + P_t,\qquad j \in \{\text{fast},\text{med},\text{slow}\},\qquad A^{(j)}_{-1}=0
+$$ {#eq-api}
+
+$$E^{\text{ant}}_t = \lambda_e\,E^{\text{ant}}_{t-1} + \mathrm{PET}_t,\qquad E^{\text{ant}}_{-1}=0
+$$ {#eq-eant}
+
+The effective memory of @eq-api is $1/(1-\lambda_j)$ days, hence the bounds in @tbl-p1
+(1.4–5 d, 5–20 d, 20–1000 d), which bracket the a02 response lag (1–3 d), recession time (9.1 d) and the
+GAGES-II contact time (549 d).
+
+Design row (with $n_\ell = $ `n_lag`, $d_t$ = day of year, $\omega = 2\pi/365.25$):
+
+$$
+\mathbf{z}_t = \Big[\,1,\;
+P_t,\dots,P_{t-n_\ell},\;
+A^{(f)}_t, A^{(m)}_t, A^{(s)}_t,\;
+E^{\text{ant}}_t,\;
+\sqrt{P_t},\;
+\tfrac{P_t A^{(m)}_t}{100},\;
+\tfrac{P_t A^{(s)}_t}{100},\;
+\big(\tfrac{A^{(s)}_t}{100}\big)^2,\;
+\sin\omega d_t,\cos\omega d_t,\sin 2\omega d_t,\cos 2\omega d_t \,\Big]
+$$ {#eq-design}
+
+With $n_\ell = 5$ that is 21 columns including the intercept. Target transform (Box–Cox):
+
+$$
+y_t = g(Q_t;\lambda_{bc}) = \begin{cases} \dfrac{Q_t^{\lambda_{bc}} - 1}{\lambda_{bc}}, & \lambda_{bc} > 10^{-6}\\[4pt]
+\ln Q_t, & \text{otherwise,}\end{cases}
+\qquad
+g^{-1}(y) = \begin{cases}\big(\max(\lambda_{bc} y + 1,\,10^{-9})\big)^{1/\lambda_{bc}}\\ e^{y}\end{cases}
+$$ {#eq-boxcox}
+
+($Q>0$ always, a02, so no offset is needed.) Columns 2… of $Z$ are standardised with the **fitting-window**
+mean and standard deviation; the intercept column is left alone and is not penalised:
+
+$$\hat{\boldsymbol\beta} = \big(Z^\top Z + \alpha\,n\,I'\big)^{-1} Z^\top \mathbf{y},
+\qquad \alpha = 10^{\texttt{log10\_ridge\_alpha}},\quad I'=\mathrm{diag}(0,1,\dots,1)
+$$ {#eq-ridge}
+
+Output equation, with the multiplicative bias correction $c$ estimated on the fitting window only:
+
+$$\hat Q_t = c\cdot\max\!\big(g^{-1}(\mathbf{z}_t^\top\hat{\boldsymbol\beta}),\,0.05\big),
+\qquad c = \frac{\sum_{t\in\text{fit}} Q_t}{\sum_{t\in\text{fit}}\max(g^{-1}(\mathbf{z}_t^\top\hat{\boldsymbol\beta}),0.05)}
+$$ {#eq-out1}
+
+## Parameters
+
+```{python}
+#| label: tbl-p1
+#| tbl-cap: "Slot 1 hyperparameters (the 21 regression coefficients are fitted in closed form and are not searched)."
+def ptab(slot):
+    m = [x for x in MODELS["models"] if x["slot"] == slot][0]
+    d = pd.DataFrame(m["parameters"])
+    keep = [c for c in ["name", "units", "lower", "upper", "default", "integer", "description", "source"] if c in d]
+    return d[keep]
+ptab(1)
+```
+
+## Initial states and warm-up
+
+$A^{(j)}_{-1}=E^{\text{ant}}_{-1}=0$. With $\lambda_{\text{slow}} \le 0.999$ the slowest recursion needs
+$\approx 3/(1-\lambda) \approx 3000$ d to be fully spun up in the worst case, but $\ge 365$ d removes >97 %
+of the transient for $\lambda \le 0.992$; `warmup_days_min: 365` is declared, and a11 must keep
+$\lambda_{\text{slow}} \le 0.995$ if the evaluation warm-up (92 d) is a concern — the model is
+*standardised*, so a residual spin-up offset is largely absorbed by the intercept.
+
+## Mass balance check
+
+Not applicable (no stores). The builder must instead assert, on the fitting window,
+$0.9 \le \overline{\hat Q}/\overline{Q} \le 1.1$ (guaranteed by @eq-out1 up to the clipping) and
+$\hat Q_t > 0\;\forall t$.
+
+## Numerical pitfalls
+
+* Standardise the design columns *before* the ridge solve, otherwise $\alpha$ means something different for
+  every column; store the means/sds in the artefact and reuse them at prediction time.
+* Use `scipy.linalg.solve(A, b, assume_a="pos")`, never `np.linalg.inv`.
+* Clip $\lambda_{bc}y+1$ at $10^{-9}$ before the fractional power (@eq-boxcox), otherwise NaNs appear for
+  strongly negative predictions.
+* `n_lag` arrives from a continuous optimizer: round it (`int(round(x))`) and clip to [1, 10].
+* The first `n_lag` rows of the frame have undefined lags: fill with 0 (dry) and exclude them from fitting.
+
+## Implementation route
+
+From scratch, `numpy` + `scipy.linalg`. `kind: "trainable"`, so:
+`fit(forcing, target, params)` builds @eq-design, solves @eq-ridge and stores
+$(\hat\beta, \text{col means/sds}, c, \lambda_{bc}, n_\ell)$; `simulate(forcing, params)` rebuilds the
+features on the frame it is given and applies the stored coefficients.
+**Lazy-fit rule:** if `simulate` is called on an unfitted instance it must fit itself on the calibration
+window obtained through `src.common.data` (never `slice_run(..., "evaluation")`) and emit a warning.
+`save`/`load` must round-trip a plain `.npz`/`.json` artefact.
+
+Fitting protocol (also in `config/models.yaml → fit_protocol`): coefficients on
+`calibration_internal.train`, hyperparameters selected on `calibration_internal.validation`, then a final
+closed-form **refit of the coefficients on the full calibration metric window** with the selected
+hyperparameters. No evaluation data at any stage.
+
+## Expected behaviour
+
+Strengths: unbiased in the mean by construction, extremely cheap, no equifinality drama, and a
+transparent statement of "how much is memory". Weaknesses: no mass conservation, it will smear flood
+peaks (a linear map cannot produce a 45 mm/d spike from a 100 mm storm on dry soil), and recessions decay
+as a mixture of exponentials fixed by $\lambda_j$ rather than by storage. **Expected NSE 0.60–0.75
+(calibration), 0.50–0.72 (evaluation)**; KGE $\alpha$ clearly below 1 (variance under-dispersion).
+
+# Slot 2 — GR4J {#sec-model2}
+
+## Overview
+
+GR4J [@perrin2003] is the four-parameter daily lumped model of the French "Génie Rural" family, developed
+by successive structural simplification tested on 429 catchments. It is the standard parsimony benchmark
+in comparative hydrology and is available as the R package `airGR` [@coron2017], which the builder should
+use as a numerical **test oracle** if R is available (it is not required). @wang2024 applied GR-type and
+other lumped structures to this very record.
+
+**Why for the Leaf River.** GR4J satisfies four of the five hard requirements with four parameters:
+a soil-moisture-dependent production function (variable runoff coefficient), ET that can reach PET, a
+**non-linear routing store** with $Q_r \propto R^5$ for small $R$ — the direct analogue of the observed
+Brutsaert–Nieber $b = 1.68$ — and a 1–3 d unit hydrograph. Its weak point here is that it has *one* slow
+store; the exchange term $x_2$ then has to absorb the long-term balance, which makes it an interesting
+diagnostic (a01 flags inter-catchment exchange as a MEDIUM-priority process).
+
+## Conceptual diagram
+
+```{mermaid}
+flowchart TD
+  P[P] --> N{"P ≥ E ?"}
+  E[E = PET] --> N
+  N -->|yes| PN["Pn = P − E, En = 0"]
+  N -->|no| EN["En = E − P, Pn = 0"]
+  PN --> PS["Ps (eq. 2.2)"]
+  EN --> ES["Es (eq. 2.3)"]
+  PS --> S[("production store S<br/>capacity x1")]
+  ES -.-> S
+  S --> PERC["Perc (eq. 2.5)"]
+  PN --> DIR["Pn − Ps"]
+  PERC --> PR["Pr = Perc + (Pn − Ps)"]
+  DIR --> PR
+  PR --> U1["0.9·Pr → UH1 (base x4)"]
+  PR --> U2["0.1·Pr → UH2 (base 2x4)"]
+  U1 --> Q9["Q9"]
+  U2 --> Q1["Q1"]
+  Q9 --> R[("routing store R<br/>ref. capacity x3")]
+  F["exchange F = x2·(R/x3)^3.5"] --> R
+  F --> QD
+  R --> QR["Qr = R·(1−(1+(R/x3)^4)^(−1/4))"]
+  Q1 --> QD["Qd = max(0, Q1 + F)"]
+  QR --> Q[["Q = Qr + Qd"]]
+  QD --> Q
+```
+
+## Perceptual → conceptual assumptions
+
+*Represented*: soil-moisture control of the runoff coefficient (saturation-excess in a bulk sense),
+ET limited by soil water, percolation to a routing store, non-linear release, translation delay, and a
+net gain/loss of groundwater across the topographic divide.
+*Ignored*: separate tension/free water, an explicit second (very slow) aquifer, any snow or frozen ground,
+and a distinction between fast surface and fast subsurface flow.
+
+## Mathematical formulation
+
+State variables: $S$ (production store, mm, $0\le S\le x_1$), $R$ (routing store, mm, $R\ge 0$), plus the
+two unit-hydrograph memory vectors. Order of operations within day $t$ (explicit, operator-split; this is
+the scheme actually used, not an ODE solver):
+
+**(1) Net forcing.** With $E = \mathrm{PET}_t$:
+$$P_n = \max(P_t - E,\,0),\qquad E_n = \max(E - P_t,\,0) \quad(\text{only one is non-zero})$$ {#eq-gr1}
+
+**(2) Rain entering the production store.**
+$$P_s = \frac{x_1\left(1-\left(\frac{S}{x_1}\right)^2\right)\tanh\!\frac{P_n}{x_1}}
+{1+\frac{S}{x_1}\tanh\!\frac{P_n}{x_1}}$$ {#eq-gr2}
+
+**(3) Actual evaporation from the store.**
+$$E_s = \frac{S\left(2-\frac{S}{x_1}\right)\tanh\!\frac{E_n}{x_1}}
+{1+\left(1-\frac{S}{x_1}\right)\tanh\!\frac{E_n}{x_1}}$$ {#eq-gr3}
+
+**(4) Store update.** $\;S \leftarrow S - E_s + P_s$.
+
+**(5) Percolation.**
+$$\mathrm{Perc} = S\left[1-\left(1+\left(\tfrac{4}{9}\tfrac{S}{x_1}\right)^{4}\right)^{-1/4}\right],
+\qquad S \leftarrow S - \mathrm{Perc}$$ {#eq-gr5}
+
+**(6) Routed volume.** $\;P_r = \mathrm{Perc} + (P_n - P_s)$, split 90 % / 10 %.
+
+**(7) Unit hydrographs.** With $\mathrm{SH}_1(u)=0$ for $u\le0$, $(u/x_4)^{5/2}$ for $0<u<x_4$, $1$ for
+$u\ge x_4$; and $\mathrm{SH}_2(u)= \tfrac12 (u/x_4)^{5/2}$ for $0<u<x_4$,
+$1-\tfrac12(2-u/x_4)^{5/2}$ for $x_4\le u<2x_4$, $1$ for $u\ge 2x_4$:
+$$u^{(1)}_j = \mathrm{SH}_1(j)-\mathrm{SH}_1(j-1),\quad j=1..\lceil x_4\rceil;\qquad
+u^{(2)}_j = \mathrm{SH}_2(j)-\mathrm{SH}_2(j-1),\quad j=1..\lceil 2x_4\rceil$$ {#eq-gr7}
+$$Q_9 = 0.9\sum_j u^{(1)}_j P_r(t-j+1),\qquad Q_1 = 0.1\sum_j u^{(2)}_j P_r(t-j+1)$$ {#eq-gr8}
+
+**(8) Groundwater exchange.** $\;F = x_2\left(\dfrac{R}{x_3}\right)^{7/2}$
+
+**(9) Routing store.** $\;R \leftarrow \max(0,\;R + Q_9 + F)$, then
+$$Q_r = R\left[1-\left(1+\left(\tfrac{R}{x_3}\right)^{4}\right)^{-1/4}\right],\qquad R \leftarrow R - Q_r$$ {#eq-gr9}
+
+**(10) Output.** $\;Q_d = \max(0,\,Q_1+F)$, $\;\boxed{Q_t = Q_r + Q_d}$
+
+For small $R/x_3$, @eq-gr9 expands to $Q_r \approx R^5/(4x_3^4)$: a strongly non-linear storage–discharge
+relation, which is precisely why GR4J can reproduce a $b>1$ recession with a single store.
+
+## Parameters
+
+```{python}
+#| label: tbl-p2
+#| tbl-cap: "Slot 2 (GR4J) parameters. Bounds combine Perrin et al. (2003) with the a01 physical priors."
+ptab(2)
+```
+
+## Initial states and warm-up
+
+$S_0 = 0.30\,x_1$, $R_0 = 0.50\,x_3$, both UH memories zero (airGR convention). These depend only on
+parameters, never on observations, so they are legitimate in the evaluation window.
+`warmup_days_min: 365`.
+
+## Mass balance check (builder must test)
+
+Accumulating over any window,
+$$\sum P - \sum E_s - \sum Q \;+\; \sum F^{\text{added}} \;=\; \Delta S + \Delta R + \Delta \mathrm{UH}_1 + \Delta \mathrm{UH}_2$$ {#eq-gr-mb}
+where $F^{\text{added}}$ is the exchange water actually added (i.e. after the $\max(0,\cdot)$ clips in
+steps 9 and 10, counted once for the routing branch and once for the direct branch). Required tolerance:
+$|\text{residual}| < 10^{-8}$ mm per 1000 days. Run the test with $x_2=0$ first (then $F\equiv0$ and the
+identity is exact), then with $x_2=\pm3$ mm/d.
+
+## Numerical pitfalls
+
+* $\tanh$ overflows for arguments $\gtrsim 20$; clip $P_n/x_1$ and $E_n/x_1$ at 13.
+* $\sum_j u^{(1)}_j = \sum_j u^{(2)}_j = 1$ must hold to $10^{-12}$; recompute ordinates whenever $x_4$
+  changes (i.e. once per parameter set, not per time step).
+* $\lceil x_4\rceil$ with $x_4 = 1.0$ gives a single ordinate — make sure the array is never empty
+  (bounds start at 0.5, so $\lceil x_4\rceil\ge1$ always).
+* With $x_2<0$ the routing store can be driven negative: clip and *record* the clipped amount for
+  @eq-gr-mb.
+* Keep $S$ inside $[0,x_1]$ by construction (@eq-gr2–@eq-gr3 guarantee it analytically); add an assertion
+  rather than a clip, so a coding error is caught instead of hidden.
+
+## Implementation route
+
+From scratch, NumPy with an explicit daily loop (optionally `numba.njit`); ~40 lines. Follow
+@perrin2003 Appendix and the `airGR::RunModel_GR4J` reference [@coron2017]. Validate on
+(i) the mass balance above, (ii) a 1-day impulse: a single 100 mm rain on a dry store must produce a
+hydrograph whose peak is at day $\approx x_4$ and whose volume equals the routed volume, and (iii) if R is
+available, `airGR` output agreement to $10^{-6}$ mm/d.
+
+## Expected behaviour
+
+Strengths: robust, few parameters, very fast ($10^5$ runs are cheap), non-linear recession, excellent
+prior evidence on humid catchments. Weaknesses: a single slow store must serve both the 10-d and the
+several-hundred-day time scale, so expect systematic under-estimation of very long summer recessions;
+$x_2$ may compensate a structural ET error and end up physically implausible (watch $|x_2|>3$ mm/d).
+**Expected NSE 0.78–0.86 (calibration), 0.72–0.84 (evaluation).**
+
+# Slot 3 — HBV-light without snow {#sec-model3}
+
+## Overview
+
+HBV [@bergstrom1992; @lindstrom1997] in the "HBV-light" formulation of @seibert2012, with the snow routine
+removed (a01 decision: snow = 0.8 % of $P$; DECISIONS.md). Nine parameters: three for the soil routine,
+five for the response routine, one for routing. HBV is the best-performing conceptual model documented at
+this gauge (calibrated NSE 0.819; uncalibrated 0.687 — a01, after @kratzert2019).
+
+**Why for the Leaf River.** It is the only structure in the portfolio with an **explicit storage threshold**
+in the fast response: the outlet $K_0$ only operates when $S_{UZ} > UZL$. a02's event analysis (runoff
+coefficients spanning two orders of magnitude and correlated with antecedent wetness, $r = 0.57$) is
+exactly the signature of a threshold. It also carries the **two subsurface time scales** demanded by
+@sec-evidence ($K_1 \approx 0.1$ d⁻¹ ⇒ $\tau \approx 10$ d; $K_2 \approx 0.002$ d⁻¹ ⇒ $\tau \approx 500$ d),
+and its $\beta$-function recharge is a different parameterisation of the variable contributing area than
+GR4J's $\tanh$ production store — good for ensemble diversity.
+
+## Conceptual diagram
+
+```{mermaid}
+flowchart TD
+  P[P] --> REC["recharge R = P·(SM/FC)^β"]
+  P --> SMIN["P − R"]
+  SMIN --> SM[("soil moisture SM<br/>capacity FC")]
+  PET[PET] --> EA["Ea = PET·min(SM/(LP·FC), 1)"]
+  SM --> EA
+  EA -->|"to atmosphere"| ATM(("ET"))
+  REC --> SUZ[("upper box SUZ")]
+  SUZ --> Q0["Q0 = K0·max(SUZ − UZL, 0)"]
+  SUZ --> Q1["Q1 = K1·SUZ"]
+  SUZ --> PERCF["PERC = min(PERCmax, SUZ)"]
+  PERCF --> SLZ[("lower box SLZ")]
+  SLZ --> Q2["Q2 = K2·SLZ"]
+  Q0 --> SUM["Qgen = Q0+Q1+Q2"]
+  Q1 --> SUM
+  Q2 --> SUM
+  SUM --> UH["triangular UH, base MAXBAS"]
+  UH --> Q[["Q (mm/d)"]]
+```
+
+## Perceptual → conceptual assumptions
+
+*Represented*: a non-linear (power-law) partition of rain between soil storage and recharge; ET throttled
+below a soil-moisture threshold $LP\cdot FC$; a capped percolation to a deep store; a threshold-activated
+near-surface outlet, an interflow outlet and a slow baseflow outlet; translation by a symmetric triangle.
+*Ignored*: tension/free-water distinction, capillary rise (the optional HBV `CFLUX` term is dropped),
+groundwater exchange across the divide, and any land-cover zonation (the basin is run as one lumped zone).
+
+## Mathematical formulation
+
+States: $SM$ (mm, $0\le SM\le FC$), $S_{UZ}$ (mm), $S_{LZ}$ (mm), and the MAXBAS memory.
+Order of operations within day $t$ (explicit Euler / operator splitting):
+
+**(1) Recharge (soil routine).**
+$$R_t = P_t\left(\frac{SM_{t-1}}{FC}\right)^{\beta},\qquad SM^{*} = SM_{t-1} + P_t - R_t$$ {#eq-hbv1}
+If $SM^{*} > FC$, move the excess to recharge: $R_t \leftarrow R_t + (SM^{*}-FC)$, $SM^{*} \leftarrow FC$.
+
+**(2) Actual evaporation.**
+$$E_{a,t} = \mathrm{PET}_t \cdot \min\!\left(\frac{SM^{*}}{LP\cdot FC},\,1\right),\qquad
+SM_t = \max\!\big(SM^{*} - E_{a,t},\,0\big)$$ {#eq-hbv2}
+(if the $\max$ clips, reduce $E_{a,t}$ by the clipped amount so mass is conserved).
+
+**(3) Percolation.**
+$$\mathrm{PERC}_t = \min\big(\mathrm{PERC},\; S_{UZ,t-1} + R_t\big),\qquad
+S^{*}_{UZ} = S_{UZ,t-1} + R_t - \mathrm{PERC}_t,\qquad
+S^{*}_{LZ} = S_{LZ,t-1} + \mathrm{PERC}_t$$ {#eq-hbv3}
+
+**(4) Response routine** (with the effective constants $K_0^{\text{eff}}=\max(K_0,K_1)$ and
+$K_2^{\text{eff}}=\min(K_2,\,0.9K_1)$, see @sec-m3-order):
+$$Q_{0,t}=K_0^{\text{eff}}\max\!\big(S^{*}_{UZ}-UZL,\,0\big),\qquad
+Q_{1,t}=K_1 S^{*}_{UZ},\qquad
+Q_{2,t}=K_2^{\text{eff}} S^{*}_{LZ}$$ {#eq-hbv4}
+$$S_{UZ,t} = S^{*}_{UZ}-Q_{0,t}-Q_{1,t},\qquad S_{LZ,t}=S^{*}_{LZ}-Q_{2,t}$$ {#eq-hbv5}
+If $Q_{0,t}+Q_{1,t} > S^{*}_{UZ}$ (possible only for extreme $K$ combinations), scale both down by
+$S^{*}_{UZ}/(Q_{0,t}+Q_{1,t})$ and set $S_{UZ,t}=0$.
+
+**(5) Routing.** Generated runoff $Q^{\text{gen}}_t = Q_{0,t}+Q_{1,t}+Q_{2,t}$ is convolved with the
+triangular weights obtained by integrating the unit-area isosceles triangle $h(u)$ on $[0,\mathrm{MAXBAS}]$:
+$$w_j=\int_{j-1}^{j} h(u)\,\mathrm{d}u,\quad j=1..\lceil \mathrm{MAXBAS}\rceil,\qquad
+h(u)=\frac{4}{\mathrm{MAXBAS}^2}\min\!\big(u,\ \mathrm{MAXBAS}-u\big)_+ $$ {#eq-hbv6}
+$$w_j \leftarrow w_j\Big/\sum_k w_k,\qquad \boxed{\,Q_t=\sum_j w_j\,Q^{\text{gen}}_{t-j+1}\,}$$ {#eq-hbv7}
+
+## Parameter ordering rule {#sec-m3-order}
+
+HBV requires $K_0 \ge K_1 > K_2$. Rectangular bounds are far easier for a global optimizer, so the
+**model** enforces the ordering by the monotone maps $K_0^{\text{eff}}=\max(K_0,K_1)$,
+$K_2^{\text{eff}}=\min(K_2,0.9K_1)$. The optimizer therefore searches a box; the effective values must be
+reported by a13 alongside the raw ones.
+
+## Parameters
+
+```{python}
+#| label: tbl-p3
+#| tbl-cap: "Slot 3 (HBV-light, no snow) parameters."
+ptab(3)
+```
+
+## Initial states and warm-up
+
+$SM_0 = 0.60\,FC$; $S_{UZ,0}=5$ mm; $S_{LZ,0}=\min\!\big(400,\;0.40/\max(K_2^{\text{eff}},10^{-4})\big)$ mm
+so that the initial baseflow $K_2 S_{LZ}$ is $\approx 0.40$ mm/d — the order of the basin's late-summer low
+flow — **derived from the parameter, not from any observation**. UH memory zero.
+`warmup_days_min: 365`.
+
+## Mass balance check (builder must test)
+
+$$\sum P - \sum E_a - \sum Q \;=\; \Delta SM + \Delta S_{UZ} + \Delta S_{LZ} + \Delta \mathrm{UH}$$ {#eq-hbv-mb}
+with $|\text{residual}| < 10^{-8}$ mm per 1000 days. HBV has no exchange term, so this identity is exact
+and is the strongest single test of the implementation.
+
+## Numerical pitfalls
+
+* Compute the recharge with $SM_{t-1}$ (start-of-step storage), then update — swapping the order changes
+  the model.
+* Cap $SM$ at $FC$ by *transferring* the excess to $R_t$; never discard it.
+* $\left(SM/FC\right)^\beta$ with $SM=0$ is 0 for $\beta\ge1$ — fine, but guard $SM\ge0$ anyway.
+* Fluxes in @eq-hbv4 are computed from the *pre-update* storages; subtract afterwards (explicit Euler).
+* Normalise the MAXBAS weights (@eq-hbv7): the analytic integral of the truncated triangle does not sum to
+  1 when $\mathrm{MAXBAS}$ is not an integer.
+* `PERC` = 0 is inside the bounds and legal (then $S_{LZ}$ only drains) — do not divide by it.
+
+## Implementation route
+
+From scratch, NumPy daily loop (numba optional; ~50 lines), following @seibert2012 §"Standard version,
+soil and response routines". Cross-checks: (i) mass balance @eq-hbv-mb; (ii) with $UZL$ huge and
+$K_0=K_1$ the model must collapse to the classic two-linear-reservoir HBV; (iii) with $P=0$ for 200 d the
+simulated recession must be a two-exponential mixture with rates $K_1$ and $K_2^{\text{eff}}$ — compare
+against the analytic solution.
+
+## Expected behaviour
+
+Strengths: explicit threshold response, two subsurface time scales, strong at-gauge evidence, still cheap
+enough for $10^5$ runs. Weaknesses: the lower box is *linear*, so the very-long-tail recession is
+exponential rather than power-law; $UZL$/$K_0$ are typically weakly identified in a basin with only 12 %
+overland flow, so expect a flat likelihood ridge there (a10: this pair is the main equifinality risk).
+**Expected NSE 0.80–0.87 (calibration), 0.74–0.85 (evaluation).**
+
+# Slot 4 — SAC-SMA {#sec-model4}
+
+## Overview
+
+The Sacramento Soil Moisture Accounting model [@burnash1973] is the US National Weather Service River
+Forecast System's operational rainfall–runoff model, and the historical test bed of this very data set:
+@duan1992 introduced SCE-UA by calibrating SAC-SMA on the Leaf River, @sorooshian1993 studied its data
+requirements here, and @boyle2001 its multi-criteria calibration. a01 reports NSE 0.796 for a calibrated
+SAC-SMA + Snow-17 at 02472000.
+
+**Why for the Leaf River.** It is the only structure in the portfolio that represents *all* of a01's
+process priorities simultaneously: (i) a tension/free-water split in both the upper and the lower zone
+(so ET can draw from tension water while free water drains), (ii) a **variable contributing area**
+(`ADIMP`) that saturates and generates direct runoff, matching the Dunne 5.1 % / wetland 13.6 %
+signature, (iii) a **demand-driven percolation** whose rate rises with lower-zone deficiency
+($\mathrm{ZPERC}$, $\mathrm{REXP}$) — a genuine non-linear coupling absent from GR4J and HBV, and
+(iv) **two parallel baseflow stores** (`LZFSC`, `LZFPC`) with independent depletion rates, the direct
+representation of the 9-d vs 549-d puzzle. Snow-17 is omitted (a01 decision).
+
+## Conceptual diagram
+
+```{mermaid}
+flowchart TD
+  P[P] --> IMP["PCTIM·P → ROIMP"]
+  P --> ADI[("ADIMC<br/>additional impervious")]
+  P --> UZTW[("UZTWC ≤ UZTWM<br/>upper tension")]
+  UZTW -->|"excess TWX"| UZFW[("UZFWC ≤ UZFWM<br/>upper free")]
+  UZFW -->|"SUR: overflow"| CH
+  UZFW -->|"SIF = UZK·UZFWC"| CH
+  UZFW -->|"PERC (eq. 4.6)"| SPLIT{"split<br/>PFREE"}
+  ADI -->|"ADDRO = PINC·RATIO²"| CH
+  SPLIT -->|"1−PFREE"| LZTW[("LZTWC ≤ LZTWM<br/>lower tension")]
+  SPLIT -->|"PFREE + LZTW overflow"| LZF{"free-water split<br/>FRACP"}
+  LZF --> LZFS[("LZFSC ≤ LZFSM<br/>supplemental")]
+  LZF --> LZFP[("LZFPC ≤ LZFPM<br/>primary")]
+  LZFS -->|"LZSK·LZFSC"| CH
+  LZFP -->|"LZPK·LZFPC"| CH
+  IMP --> CH[["total channel inflow TCI"]]
+  PET[PET] --> ET["E1 (UZTW) → E2 (UZFW) → E3 (LZTW) → E5 (ADIMC)"]
+  ET -.-> UZTW
+  ET -.-> UZFW
+  ET -.-> LZTW
+  ET -.-> ADI
+  CH --> UH["gamma UH (UH_N, UH_K)"]
+  UH --> Q[["Q (mm/d)"]]
+```
+
+## Perceptual → conceptual assumptions
+
+*Represented*: infiltration-excess (via `PCTIM`/upper-zone overflow), saturation-excess on an expanding
+area (`ADIMP`), interflow, two baseflow components, tension-water ET demand hierarchy, and
+storage-deficiency-driven percolation. *Ignored*: snow, riparian ET (`RIVA` = 0), deep recharge that
+bypasses the gauge (`SIDE` = 0), and any spatial distribution.
+
+## Mathematical formulation
+
+**States** (mm): $UZTWC, UZFWC, LZTWC, LZFSC, LZFPC, ADIMC$ and the UH memory.
+**Derived constant**: $\mathrm{PAREA} = 1 - \mathrm{PCTIM} - \mathrm{ADIMP}$.
+The algorithm below is the NWS `fland1` sequence; it must be implemented exactly in this order.
+
+**(4.1) Evapotranspiration demand hierarchy.** With $E_{\text{dmnd}} = \mathrm{PET}_t$:
+$$E_1 = E_{\text{dmnd}}\frac{UZTWC}{UZTWM},\qquad UZTWC \leftarrow UZTWC - E_1,\qquad
+\mathrm{RED} = E_{\text{dmnd}}-E_1$$
+(if $UZTWC<0$: $E_1 \leftarrow E_1 + UZTWC$, $UZTWC \leftarrow 0$)
+$$E_2 = \min(\mathrm{RED},\,UZFWC),\qquad UZFWC \leftarrow UZFWC-E_2,\qquad \mathrm{RED}\leftarrow \mathrm{RED}-E_2$$
+**Upper-zone rebalance:** if $UZTWC/UZTWM < UZFWC/UZFWM$, set
+$\mathrm{UZRAT}=\dfrac{UZTWC+UZFWC}{UZTWM+UZFWM}$, $UZTWC = UZTWM\cdot \mathrm{UZRAT}$,
+$UZFWC = UZFWM\cdot \mathrm{UZRAT}$.
+$$E_3 = \mathrm{RED}\,\frac{LZTWC}{UZTWM+LZTWM},\qquad LZTWC \leftarrow LZTWC - E_3 \;(\ge 0)$$ {#eq-sac-et}
+**Lower-zone tension resupply:** with $\mathrm{SAVED}=\mathrm{RSERV}(LZFPM+LZFSM)$,
+$\mathrm{RATLZT}=LZTWC/LZTWM$ and
+$\mathrm{RATLZ}=\dfrac{LZTWC+LZFPC+LZFSC-\mathrm{SAVED}}{LZTWM+LZFPM+LZFSM-\mathrm{SAVED}}$: if
+$\mathrm{RATLZT}<\mathrm{RATLZ}$, transfer $\mathrm{DEL}=(\mathrm{RATLZ}-\mathrm{RATLZT})LZTWM$ from
+$LZFSC$ (then $LZFPC$ if $LZFSC$ runs out) to $LZTWC$.
+**ET from the additional impervious area:**
+$$E_5 = E_1 + (\mathrm{RED}+E_2)\frac{ADIMC-E_1-UZTWC}{UZTWM+LZTWM},\qquad ADIMC\leftarrow ADIMC-E_5\;(\ge0),
+\qquad E_5 \leftarrow \mathrm{ADIMP}\cdot E_5$$ {#eq-sac-e5}
+
+**(4.2) Precipitation into the upper tension store.**
+$$\mathrm{TWX}=\max(P_t + UZTWC - UZTWM,\,0),\qquad
+UZTWC = \begin{cases}UZTWC+P_t & \text{if } P_t+UZTWC<UZTWM\\ UZTWM & \text{otherwise}\end{cases}$$
+$$ADIMC \leftarrow ADIMC + P_t - \mathrm{TWX},\qquad \mathrm{ROIMP}=P_t\cdot \mathrm{PCTIM}$$ {#eq-sac-twx}
+
+**(4.3) Sub-daily incrementation** (mandatory for stability):
+$$N_{\text{inc}} = 1+\left\lfloor 0.2\,(UZFWC+\mathrm{TWX})\right\rfloor,\quad
+\Delta = 1/N_{\text{inc}},\quad P_{\text{inc}}=\mathrm{TWX}/N_{\text{inc}}$$
+$$D_{UZ}=1-(1-\mathrm{UZK})^{\Delta},\quad D_{LZP}=1-(1-\mathrm{LZPK})^{\Delta},\quad
+D_{LZS}=1-(1-\mathrm{LZSK})^{\Delta}$$ {#eq-sac-ninc}
+
+**(4.4) Loop $i=1..N_{\text{inc}}$:**
+
+a. *Additional-impervious direct runoff.*
+ $\mathrm{RATIO}=\max\!\big((ADIMC-UZTWC)/LZTWM,\,0\big)$, $\;\mathrm{ADDRO}=P_{\text{inc}}\mathrm{RATIO}^2$.
+b. *Baseflow.* $B_p = LZFPC\,D_{LZP}$, $LZFPC \mathrel{-}= B_p$; $B_s = LZFSC\,D_{LZS}$,
+ $LZFSC \mathrel{-}= B_s$; accumulate $\mathrm{SBF} \mathrel{+}= B_p+B_s$.
+c. *Percolation* (only if $P_{\text{inc}}+UZFWC>2\cdot10^{-6}$):
+$$\mathrm{PERCM}=LZFPM\,D_{LZP}+LZFSM\,D_{LZS},\qquad
+\mathrm{DEFR}=1-\frac{LZTWC+LZFPC+LZFSC}{LZTWM+LZFPM+LZFSM}$$
+$$\mathrm{PERC}=\mathrm{PERCM}\Big(1+\mathrm{ZPERC}\,\mathrm{DEFR}^{\mathrm{REXP}}\Big)\frac{UZFWC}{UZFWM}$$ {#eq-sac-perc}
+ capped by $\mathrm{PERC}\le UZFWC$ and by the remaining remaining lower-zone capacity; then
+ $UZFWC \mathrel{-}= \mathrm{PERC}$.
+d. *Interflow.* $\;\mathrm{DEL}=UZFWC\,D_{UZ}$, $\;\mathrm{SIF}\mathrel{+}=\mathrm{DEL}$,
+ $\;UZFWC\mathrel{-}=\mathrm{DEL}$.
+e. *Distribute percolation.* $\mathrm{PERCT}=\mathrm{PERC}(1-\mathrm{PFREE})$ goes to $LZTWC$ (overflow
+ $\mathrm{PERCF}$ carries on); $\mathrm{PERCF}\mathrel{+}=\mathrm{PERC}\cdot\mathrm{PFREE}$. Split
+ $\mathrm{PERCF}$ between the two free-water stores with
+$$\mathrm{HPL}=\frac{LZFPM}{LZFPM+LZFSM},\quad
+\mathrm{FRACP}=\min\!\left(1,\ \mathrm{HPL}\,\frac{2(1-LZFPC/LZFPM)}{(1-LZFPC/LZFPM)+(1-LZFSC/LZFSM)}\right)$$ {#eq-sac-fracp}
+ $\mathrm{PERCP}=\mathrm{FRACP}\cdot\mathrm{PERCF}$ → $LZFPC$, remainder → $LZFSC$; any overflow of either
+ store is returned to $LZTWC$.
+f. *Surface runoff.* If $P_{\text{inc}}+UZFWC>UZFWM$:
+ $\mathrm{SUR}=P_{\text{inc}}+UZFWC-UZFWM$, $UZFWC=UZFWM$,
+ $\mathrm{SSUR}\mathrel{+}=\mathrm{SUR}\cdot \mathrm{PAREA}$,
+ $\mathrm{ADSUR}=\mathrm{SUR}\left(1-\mathrm{ADDRO}/P_{\text{inc}}\right)$,
+ $\mathrm{SSUR}\mathrel{+}=\mathrm{ADSUR}\cdot\mathrm{ADIMP}$; else $UZFWC\mathrel{+}=P_{\text{inc}}$,
+ $\mathrm{ADSUR}=0$.
+g. *ADIMC update.* $ADIMC \mathrel{+}= P_{\text{inc}}-\mathrm{ADDRO}-\mathrm{ADSUR}$; if
+ $ADIMC>UZTWM+LZTWM$, move the excess to $\mathrm{ADDRO}$ and cap. Accumulate
+ $\mathrm{SDRO}\mathrel{+}=\mathrm{ADDRO}\cdot\mathrm{ADIMP}$.
+
+**(4.5) Channel inflow.**
+$$\mathrm{TCI}_t = \mathrm{ROIMP} + \mathrm{SDRO} + \mathrm{SSUR} + \mathrm{SIF}\cdot \mathrm{PAREA}
++ \frac{\mathrm{SBF}\cdot \mathrm{PAREA}}{1+\mathrm{SIDE}}$$ {#eq-sac-tci}
+with $\mathrm{SIDE}=0$ here. Total ET: $\mathrm{TET}_t=(E_1+E_2+E_3)\mathrm{PAREA}+E_5$
+(plus $E_4=0$ since $\mathrm{RIVA}=0$).
+
+**(4.6) Routing — 2-parameter gamma (Nash) unit hydrograph** [@nash1957]:
+$$u_j = F_\Gamma\!\big(j;\,\mathrm{UH\_N},\mathrm{UH\_K}\big)-F_\Gamma\!\big(j-1;\,\mathrm{UH\_N},\mathrm{UH\_K}\big),
+\qquad j = 1..n_{uh},\qquad u_j \leftarrow u_j\Big/\textstyle\sum_k u_k$$ {#eq-sac-uh}
+$$\boxed{\,Q_t=\sum_{j=1}^{n_{uh}} u_j\,\mathrm{TCI}_{t-j+1}\,},\qquad
+n_{uh}=\min\!\big(60,\ \min\{n: F_\Gamma(n)\ge0.9999\}\big)$$
+Mean lag $=\mathrm{UH\_N}\cdot\mathrm{UH\_K}$ days, which the bounds place at 0.1–15 d with a prior of
+1–3 d (a01).
+
+## Parameters
+
+```{python}
+#| label: tbl-p4
+#| tbl-cap: "Slot 4 (SAC-SMA) free parameters. Ranges follow the DREAM manual Ex. 23 set quoted by a01, widened for PFREE (0–0.6) and PCTIM narrowed to 0–0.05 given the 0.41 % measured impervious cover."
+ptab(4)
+```
+
+```{python}
+#| label: tbl-p4fix
+#| tbl-cap: "Slot 4 fixed (non-calibrated) parameters."
+m4 = [x for x in MODELS["models"] if x["slot"] == 4][0]
+pd.DataFrame([{"name": k, "value": v["value"], "why": v["description"]} for k, v in m4["fixed_parameters"].items()])
+```
+
+## Initial states and warm-up
+
+$UZTWC=0.5\,UZTWM$, $UZFWC=0.1\,UZFWM$, $LZTWC=0.6\,LZTWM$, $LZFSC=0.2\,LZFSM$, $LZFPC=0.6\,LZFPM$,
+$ADIMC=UZTWC+LZTWC$ (a required consistency condition), UH memory zero. All parameter-derived.
+`warmup_days_min: 730` — with $\mathrm{LZPK}\approx0.004$ d⁻¹ the primary store has $\tau\approx250$ d, so
+one year is not enough to forget the initial condition inside the calibration window. (In the
+**evaluation** window only 92 d are available for *every* model; that is a property of the experiment, not
+of this slot, and a16 must interpret it as such.)
+
+## Mass balance check (builder must test)
+
+$$\sum P - \sum \mathrm{TET} - \sum \mathrm{TCI} \;=\;
+\mathrm{PAREA}\,\Delta\!\left(UZTWC+UZFWC+LZTWC+LZFSC+LZFPC\right) + \mathrm{ADIMP}\,\Delta ADIMC
++ \Delta \mathrm{UH}$$ {#eq-sac-mb}
+Tolerance $10^{-6}$ mm per 1000 days. Test it with $\mathrm{PCTIM}=\mathrm{ADIMP}=0$ first (then
+$\mathrm{PAREA}=1$ and the identity simplifies), then with $\mathrm{ADIMP}=0.3$.
+
+## Numerical pitfalls
+
+* **Never skip the sub-daily incrementation** (@eq-sac-ninc). With a 100 mm/d storm (the record maximum is
+  221.5 mm/d, a02) a single explicit step drains the upper zone by more than its content.
+* Convert depletion rates with $1-(1-K)^{\Delta}$, **not** $K\Delta$.
+* Guard every store: `if abs(x) < 1e-10: x = 0`, and return the clipped amount to the flux that caused it.
+* Assert $UZTWC \le ADIMC \le UZTWM+LZTWM$ every step; violating it is the classic SAC-SMA coding bug.
+* In step (f) $\mathrm{ADDRO}/P_{\text{inc}}$ divides by zero when $P_{\text{inc}}=0$; that branch is only
+  reached when $P_{\text{inc}}>0$, but code the guard explicitly.
+* $\mathrm{DEFR}$ can be slightly negative from round-off → `max(DEFR, 0)` before the power in @eq-sac-perc
+  ($\mathrm{REXP}$ may be fractional).
+* @eq-sac-fracp divides by $(1-LZFPC/LZFPM)+(1-LZFSC/LZFSM)$, which is 0 when both stores are full;
+  guard with $\max(\cdot,10^{-9})$ and clamp $\mathrm{FRACP}\in[0,1]$.
+* `numba.njit` the daily loop; a pure-Python loop is ~100× too slow for $10^4$–$10^5$ optimizer runs
+  (@sec-compute).
+
+## Implementation route
+
+From scratch, NumPy + `numba.njit`, following @burnash1973 and the NWS `fland1` ordering reproduced above;
+~200 lines. Use `scipy.stats.gamma.cdf` once per parameter set for @eq-sac-uh. `config/project.yaml`
+carries `external_references.sacsma_numba_path` (currently `null`); if the user later supplies an existing
+Numba SAC-SMA, a08 should use it **only as a test oracle**, not as the deliverable. Validation:
+(i) @eq-sac-mb; (ii) with $\mathrm{ADIMP}=\mathrm{PCTIM}=0$ and a 200-day dry spell the recession must be
+the sum of two exponentials with rates $\mathrm{LZSK}$ and $\mathrm{LZPK}$; (iii) simulated BFI
+(Lyne–Hollick, $\alpha = 0.925$, 3 passes) with default parameters should land in 0.3–0.6.
+
+## Expected behaviour
+
+Strengths: the most complete process representation available on P/PET alone; two baseflow time scales;
+the only structure able to separate "soil is wet but not saturated" from "saturated area is expanding".
+Weaknesses: 15 parameters with well-documented equifinality (a01: `LZPK`-type parameters are the classic
+ill-identified ones here; @sorooshian1993), a rough response surface (thresholds and the
+$N_{\text{inc}}$ switch make it **non-smooth** → derivative-free global search only, see @sec-a10), and
+~4× the run time of GR4J. **Expected NSE 0.82–0.88 (calibration), 0.74–0.85 (evaluation).**
+
+# Slot 5 — single-basin sequence-to-sequence LSTM {#sec-model5}
+
+## Overview
+
+A Long Short-Term Memory network [@hochreiter1997] applied to rainfall–runoff modelling following
+@kratzert2018 and @kratzert2019. The LSTM's cell state acts as a learned, multi-dimensional storage system
+whose "recharge" and "release" are gated by the forcing — conceptually the same role as the stores in slots
+2–4, but with the partitioning learned rather than prescribed. @kratzert2019 report NSE 0.84–0.86 for a
+*regional* LSTM at this exact gauge; here we have only one basin, so the design is heavily regularised.
+
+**Why for the Leaf River.** (i) It is the only family in the portfolio whose errors are not generated by a
+prescribed store-and-release structure, which is what makes the ensembles in @sec-ensembles worth testing.
+(ii) a02's memory analysis (linear $R^2$ still rising at a 365-day lag) says the basin has exactly the kind
+of long, non-linear memory an LSTM is built for. (iii) 36 calibration water years is at the lower edge of
+single-basin feasibility, which is why dropout, weight decay, early stopping and 5-seed averaging are all
+prescribed rather than optional.
+
+## Conceptual diagram
+
+```{mermaid}
+flowchart LR
+  subgraph IN["inputs at day t (standardised, calibration stats)"]
+    A["P_std, PET_std"]
+    B["sin/cos(2π·doy/365.25)"]
+    C["optional: API(0.98,0.93,0.80),<br/>ΣP(7,30,90,365),<br/>Σ(P−PET)(30,90,365)"]
+  end
+  IN --> L["LSTM cell<br/>h_t, c_t  (H = 32..128)"]
+  L -->|"h_t-1, c_t-1"| L
+  L --> D["dropout"]
+  D --> H["Linear(H → 1) → ŷ_t"]
+  H --> S["Q̂_t = softplus(μ_Q + σ_Q·ŷ_t)"]
+  S --> O[["Q̂_t (mm/d) > 0"]]
+```
+
+## Perceptual → conceptual assumptions
+
+*Represented*: multi-scale memory of rainfall and evaporative demand, a learned non-linear
+wetness-dependent response, and seasonality (through PET and the harmonics).
+*Ignored/absent*: mass conservation, interpretable stores, any guarantee of behaviour outside the
+calibration input distribution. The evaluation window is 1.29× wetter in the mean than calibration but
+does **not** exceed the calibration flow magnitudes (a02), so the extrapolation risk is bounded but real.
+
+## Mathematical formulation
+
+**Inputs.** Base features (always):
+$$\mathbf{x}_t = \Big[\tfrac{P_t-3.9078}{10.1414},\;\tfrac{\mathrm{PET}_t-2.9004}{1.8890},\;
+\sin\tfrac{2\pi d_t}{365.25},\;\cos\tfrac{2\pi d_t}{365.25}\Big]$$ {#eq-lstm-x}
+If `use_antecedent_features` = 1, ten more columns are appended: $A^{(\lambda)}_t=\lambda A^{(\lambda)}_{t-1}+P_t$
+for $\lambda\in\{0.98,0.93,0.80\}$; $\sum_{i=0}^{k-1}P_{t-i}$ for $k\in\{7,30,90,365\}$; and
+$\sum_{i=0}^{k-1}(P_{t-i}-\mathrm{PET}_{t-i})$ for $k\in\{30,90,365\}$. **Each of these ten is standardised
+with its own mean/sd computed on the calibration metric window only** and frozen in the model artefact.
+
+**Cell.** Standard LSTM equations, with $\sigma$ the logistic function and $\odot$ the Hadamard product:
+$$\mathbf{i}_t=\sigma(W_i\mathbf{x}_t+U_i\mathbf{h}_{t-1}+\mathbf{b}_i),\qquad
+\mathbf{f}_t=\sigma(W_f\mathbf{x}_t+U_f\mathbf{h}_{t-1}+\mathbf{b}_f)$$ {#eq-lstm-if}
+$$\mathbf{g}_t=\tanh(W_g\mathbf{x}_t+U_g\mathbf{h}_{t-1}+\mathbf{b}_g),\qquad
+\mathbf{o}_t=\sigma(W_o\mathbf{x}_t+U_o\mathbf{h}_{t-1}+\mathbf{b}_o)$$ {#eq-lstm-go}
+$$\mathbf{c}_t=\mathbf{f}_t\odot\mathbf{c}_{t-1}+\mathbf{i}_t\odot\mathbf{g}_t,\qquad
+\mathbf{h}_t=\mathbf{o}_t\odot\tanh(\mathbf{c}_t)$$ {#eq-lstm-c}
+
+**Head and output transform** ($\mu_Q=1.3533$, $\sigma_Q=2.8511$ mm/d from the calibration window):
+$$\hat y_t=\mathbf{w}^\top \mathrm{Dropout}(\mathbf{h}_t)+b,\qquad
+\boxed{\;\hat Q_t=\mathrm{softplus}\!\big(\mu_Q+\sigma_Q\,\hat y_t\big)=\ln\!\big(1+e^{\mu_Q+\sigma_Q\hat y_t}\big)\;}$$ {#eq-lstm-out}
+The softplus guarantees $\hat Q_t>0$ (the river is perennial, a02) *and* keeps the gradient alive for the
+log-space loss term, which a hard clip would not.
+
+**Loss** ($\sigma_{\log Q}=1.2192$):
+$$\mathcal{L}=\frac{1}{|\mathcal{T}|}\sum_{t\in\mathcal{T}}\left(\frac{\hat Q_t-Q_t}{\sigma_Q}\right)^{2}
+\;+\;w_{\log}\,\frac{1}{|\mathcal{T}|}\sum_{t\in\mathcal{T}}
+\left(\frac{\ln(\hat Q_t+10^{-6})-\ln Q_t}{\sigma_{\log Q}}\right)^{2}$$ {#eq-lstm-loss}
+The first term is the NSE-equivalent objective on the reported metric; the second (weight $w_{\log}$,
+default 0.25) protects the 40 % of days below 0.45 mm/d that the first term ignores (a02: the wettest 5 %
+of days carry 40 % of the volume). $\mathcal{T}$ excludes the first `warmup_steps` of every training window.
+
+**Sequence handling.** Training draws random contiguous windows of length `seq_len` (default 365 d)
+from the *internal-train* mask; the loss is evaluated only on steps
+$t>$ `warmup_steps` (default 60), so the network learns to be accurate given as little as 60 days of
+context. At **inference** the model performs a *single continuous forward pass* over whatever frame
+`simulate()` receives, with $\mathbf{h}_0=\mathbf{c}_0=\mathbf{0}$, emitting one $\hat Q_t$ per day. This
+is what makes the LSTM comparable to the conceptual slots in the evaluation window, where only 92 warm-up
+days exist before the metric period begins (a01/a16 note).
+
+## Hyperparameters
+
+```{python}
+#| label: tbl-p5
+#| tbl-cap: "Slot 5 hyperparameters exposed to a15. The ~20,000 network weights are fitted by Adam, not searched."
+ptab(5)
+```
+
+Fixed (not searched): `max_epochs` 200, early-stopping patience 20, gradient-norm clip 1.0, lr $\times$ 0.5
+at epochs 60 and 120, seeds 42–46 (5 ensemble members, output = arithmetic mean of the members' $\hat Q$).
+
+## Initial states and warm-up
+
+$\mathbf{h}_0=\mathbf{c}_0=\mathbf{0}$ (no observation enters). `warmup_days_min: 90`; the warm-up
+masking during training is what makes this defensible.
+
+## Mass balance check
+
+Not applicable. Required assertions instead: $\hat Q_t>0\ \forall t$ and
+$0.85\le\overline{\hat Q}/\overline{Q}\le1.15$ on the calibration metric window. a09 must **additionally**
+test that a continuous forward pass and a chunked pass with 365 d of context agree to $<10^{-3}$ mm/d after
+the first 90 days — if they do not, the model has learned a state drift and `seq_len` must be raised.
+
+## Numerical pitfalls
+
+* **Leakage**: training windows must be drawn from `internal_mask(frame, "train")` only, and the
+  standardisation constants must come from `config/models.yaml → scaling:` — never recomputed on the frame
+  given at prediction time. `load()` must restore them; a silent re-standardisation on the evaluation
+  frame would invalidate the whole study.
+* Use `torch.nn.functional.softplus` (numerically stable for large arguments), and
+  $\ln(\hat Q+10^{-6})$ in @eq-lstm-loss.
+* MPS is not bit-reproducible for all kernels; set `torch.manual_seed(seed)` per member, and if the
+  5-member mean is not reproducible across runs, fall back to `cpu` and record it in the a09/a15 handoff
+  (CLAUDE.md rule 7). Device via `src.common.data.torch_device()`.
+* Round `hidden_size`, `n_layers`, `seq_len`, `warmup_steps`, `batch_size`,
+  `use_antecedent_features` to integers when they arrive from a continuous optimizer.
+* The rolling 365-day features need 365 leading days; inside the *evaluation* frame those do not exist —
+  compute them with a growing (partial) window and divide by the number of available days, i.e.
+  `pandas.Series.rolling(k, min_periods=1).mean() * k`. Document the choice; it is applied identically in
+  calibration and evaluation.
+
+## Implementation route
+
+`torch` 2.13.0 (BSD-3). `kind: "trainable"`: `fit(forcing, target, params)` trains the 5 members;
+`simulate(forcing, params)` runs the continuous pass and averages them; `save`/`load` persist
+`state_dict`s + scaling constants + hyperparameters. Same lazy-fit rule as slot 1 (fit on the calibration
+window through `src.common.data` if unfitted; never on evaluation data).
+Compute budget: with 10,592 training days, `seq_len` 365 and batch 256 there are ~41 minibatches per epoch;
+at ≤200 epochs and 5 seeds this is well inside the 3 h limit (@sec-compute).
+
+## Expected behaviour
+
+Strengths: the highest ceiling in the portfolio and a genuinely different error structure. Weaknesses:
+~1.9 fitted weights per training day → overfitting is the main risk; no mass conservation, so the
+water-balance ($\beta$) term of KGE is not protected structurally; and behaviour in the wetter evaluation
+period is an empirical question. **Expected NSE 0.85–0.92 (calibration), 0.75–0.87 (evaluation)** — note
+the deliberately wide evaluation band: this is the slot with the largest calibration-to-evaluation drop
+risk.
+
+# Cross-model comparison {#sec-crosscompare}
+
+## Processes represented
+
+```{python}
+#| label: fig-processmatrix
+#| fig-cap: "Process-representation matrix. 2 = explicitly represented with its own parameter(s); 1 = implicitly/partially represented; 0 = absent. The bottom row counts how many slots represent each process, i.e. how redundant the portfolio is for that process."
+proc = [
+ "Non-linear runoff generation (storage dependent)",
+ "Explicit threshold in runoff generation",
+ "AET limited by soil moisture, can reach PET",
+ "Tension / free water distinction",
+ "Variable contributing (saturated) area",
+ "Infiltration-excess / impervious runoff",
+ "Interflow (fast subsurface)",
+ "Slow baseflow store",
+ "SECOND, slower baseflow store",
+ "Non-linear storage-discharge (b > 1)",
+ "Percolation control by deep-store deficiency",
+ "Inter-catchment groundwater exchange",
+ "Translation / routing delay 1-3 d",
+ "Mass conservation guaranteed",
+ "Learned (non-prescribed) response",
+]
+M = pd.DataFrame({
+ "1 ARX-API":  [1,0,1,0,0,0,1,1,1,0,0,0,2,0,0],
+ "2 GR4J":     [2,0,2,0,1,0,1,2,0,2,1,2,2,2,0],
+ "3 HBV":      [2,2,2,0,1,0,2,2,1,1,1,0,2,2,0],
+ "4 SAC-SMA":  [2,2,2,2,2,2,2,2,2,1,2,0,2,2,0],
+ "5 LSTM":     [1,1,1,0,1,0,1,1,1,1,0,0,1,0,2],
+}, index=proc)
+fig, ax = plt.subplots(figsize=(8.2, 6.4))
+sns.heatmap(M, annot=True, fmt="d", cmap="Greens", vmin=0, vmax=2, cbar=False, linewidths=.6, ax=ax)
+ax.set_title("Process representation (0 absent / 1 implicit / 2 explicit)")
+plt.tight_layout(); plt.savefig(FIG / "a03_process_matrix.png", dpi=150, bbox_inches="tight"); plt.show()
+M.assign(**{"portfolio coverage": M.sum(axis=1)})
+```
+
+Two readings of the matrix matter for a16:
+
+* **No process required by @tbl-constraints is missing from the portfolio**, and each of the five hard
+  requirements is covered by at least two slots — so a failure of one slot cannot be blamed on a missing
+  process at the portfolio level.
+* The **complementarity** is concentrated where it should be: only SAC-SMA has the tension/free split and
+  an explicit second baseflow store; only GR4J has the exchange term; only HBV has a pure threshold
+  outlet; only the LSTM has a learned response; only slot 1 has no state at all.
+
+## Response-function shapes
+
+```{python}
+#| label: fig-shapes
+#| fig-cap: "Left: runoff-generation functions — the fraction of incoming rain that becomes runoff as a function of relative soil storage (GR4J eq. 2.2 with x1 = 350 mm and Pn = 10 mm/d; HBV eq. 3.1 for beta = 1, 2, 4). Right: routing kernels at their default parameters (GR4J UH1/UH2 with x4 = 1.7 d, HBV triangle with MAXBAS = 2.5 d, SAC-SMA gamma UH with N = 2, K = 0.6 d). All kernels sum to 1."
+from scipy.stats import gamma as gammadist
+fig, axes = plt.subplots(1, 2, figsize=(11, 4.1))
+s = np.linspace(0, 1, 200)
+x1, Pn = 350.0, 10.0
+th = np.tanh(Pn / x1)
+Ps = x1 * (1 - s**2) * th / (1 + s * th)
+axes[0].plot(s, 1 - Ps / Pn, lw=2.2, label="GR4J: 1 - Ps/Pn  (x1=350, Pn=10)")
+for b in [1, 2, 4]:
+    axes[0].plot(s, s**b, lw=1.8, ls="--", label=f"HBV: (SM/FC)^beta, beta={b}")
+axes[0].set_xlabel("relative soil storage  S/x1  or  SM/FC")
+axes[0].set_ylabel("fraction of rain becoming recharge/runoff")
+axes[0].set_title("Runoff-generation functions"); axes[0].legend(fontsize=8)
+
+j = np.arange(1, 13)
+x4 = 1.7
+SH1 = lambda u: np.clip((u / x4) ** 2.5, 0, 1) * (u < x4) + 1.0 * (u >= x4)
+def SH2(u):
+    u = np.asarray(u, float); out = np.where(u < x4, 0.5 * np.clip(u / x4, 0, None) ** 2.5,
+        np.where(u < 2 * x4, 1 - 0.5 * np.clip(2 - u / x4, 0, None) ** 2.5, 1.0))
+    return np.clip(out, 0, 1)
+u1 = np.diff(np.concatenate([[0.], SH1(j)])); u2 = np.diff(np.concatenate([[0.], SH2(j)]))
+mb = 2.5
+h = lambda u: (4 / mb**2) * np.clip(np.minimum(u, mb - u), 0, None)
+from scipy.integrate import quad
+wt = np.array([quad(h, k - 1, k)[0] for k in j]); wt /= wt.sum()
+ug = np.diff(np.concatenate([[0.], gammadist.cdf(j, 2.0, scale=0.6)])); ug /= ug.sum()
+w = 0.2
+axes[1].bar(j - 1.5 * w, u1, w, label="GR4J UH1 (x4=1.7)")
+axes[1].bar(j - 0.5 * w, u2, w, label="GR4J UH2 (2x4)")
+axes[1].bar(j + 0.5 * w, wt, w, label="HBV triangle (MAXBAS=2.5)")
+axes[1].bar(j + 1.5 * w, ug, w, label="SAC-SMA gamma (N=2, K=0.6)")
+axes[1].set_xlim(0.3, 8.7); axes[1].set_xlabel("lag (days)"); axes[1].set_ylabel("ordinate")
+axes[1].set_title("Routing kernels (defaults)"); axes[1].legend(fontsize=8)
+plt.tight_layout(); plt.savefig(FIG / "a03_response_shapes.png", dpi=150, bbox_inches="tight"); plt.show()
+print("kernel sums:", [round(float(v.sum()), 12) for v in (u1, u2, wt, ug)])
+print("mean lags (d):", {"GR4J UH1": float((j*u1).sum()), "GR4J UH2": float((j*u2).sum()),
+                         "HBV": float((j*wt).sum()), "SAC-SMA": float((j*ug).sum())})
+```
+
+All four default kernels place their mass at 1–3 days, consistent with the observed onset lag of 1 d and
+$P\!\to\!Q$ cross-correlation peak at 3 d (a02).
+
+# Compute budget: a timing prototype {#sec-compute}
+
+a10 must size the global search against a hard 3 h wall-time limit per optimizer. The following is a
+**non-authoritative** reference implementation of GR4J written only to measure cost — a06 writes the
+deliverable version in `src/models/model_2.py`. It runs on the **calibration** window only.
+
+```{python}
+#| label: timing
+#| code-fold: show
+df   = load_data()
+cal  = slice_run(df, "calibration")           # 1951-10-01..1988-09-30
+mask = metric_mask(cal, "calibration")        # 1952-10-01..1988-09-30
+P, E, Qobs = cal["P"].to_numpy(), cal["PET"].to_numpy(), cal["Q"].to_numpy()
+print(f"calibration run window: {cal.index[0].date()}..{cal.index[-1].date()}  n={len(cal)}  metric days={mask.sum()}")
+
+def gr4j_uh(x4):
+    nu1, nu2 = int(np.ceil(x4)), int(np.ceil(2 * x4))
+    jj1, jj2 = np.arange(nu1 + 1.0), np.arange(nu2 + 1.0)
+    sh1 = np.where(jj1 < x4, np.clip(jj1 / x4, 0, None) ** 2.5, 1.0)
+    sh2 = np.where(jj2 < x4, 0.5 * np.clip(jj2 / x4, 0, None) ** 2.5,
+          np.where(jj2 < 2 * x4, 1 - 0.5 * np.clip(2 - jj2 / x4, 0, None) ** 2.5, 1.0))
+    u1, u2 = np.diff(sh1), np.diff(sh2)
+    return u1 / u1.sum(), u2 / u2.sum()
+
+def gr4j_core(P, E, x1, x2, x3, u1, u2):
+    """Non-authoritative timing prototype (a06 writes the deliverable). Perrin et al. (2003)."""
+    n = P.shape[0]
+    nu1, nu2 = u1.shape[0], u2.shape[0]
+    S, R = 0.30 * x1, 0.50 * x3
+    m1 = np.zeros(nu1); m2 = np.zeros(nu2)
+    Q = np.empty(n)
+    for t in range(n):
+        p = P[t]; e = E[t]
+        if p >= e:
+            pn = p - e; en = 0.0
+        else:
+            pn = 0.0; en = e - p
+        s = S / x1
+        ps = 0.0; es = 0.0
+        if pn > 0.0:
+            th = np.tanh(min(pn / x1, 13.0))
+            ps = x1 * (1.0 - s * s) * th / (1.0 + s * th)
+        else:
+            th = np.tanh(min(en / x1, 13.0))
+            es = S * (2.0 - s) * th / (1.0 + (1.0 - s) * th)
+        S = S - es + ps
+        perc = S * (1.0 - (1.0 + (4.0 / 9.0 * S / x1) ** 4) ** -0.25)
+        S -= perc
+        pr = perc + (pn - ps)
+        q9 = m1[0] + 0.9 * pr * u1[0]
+        for k in range(nu1 - 1):
+            m1[k] = m1[k + 1] + 0.9 * pr * u1[k + 1]
+        m1[nu1 - 1] = 0.0
+        q1 = m2[0] + 0.1 * pr * u2[0]
+        for k in range(nu2 - 1):
+            m2[k] = m2[k + 1] + 0.1 * pr * u2[k + 1]
+        m2[nu2 - 1] = 0.0
+        f = x2 * (R / x3) ** 3.5
+        R = R + q9 + f
+        if R < 0.0:
+            R = 0.0
+        qr = R * (1.0 - (1.0 + (R / x3) ** 4) ** -0.25)
+        R -= qr
+        qd = q1 + f
+        if qd < 0.0:
+            qd = 0.0
+        Q[t] = qr + qd
+    return Q
+
+u1, u2 = gr4j_uh(1.7)
+t0 = time.perf_counter(); Qs = gr4j_core(P, E, 350., 0., 90., u1, u2); t_np = time.perf_counter() - t0
+res = {"numpy/python loop [s/run]": t_np}
+try:
+    from numba import njit
+    gr4j_nb = njit(cache=False)(gr4j_core)
+    _ = gr4j_nb(P[:50], E[:50], 350., 0., 90., u1, u2)          # compile
+    t0 = time.perf_counter(); Qn = gr4j_nb(P, E, 350., 0., 90., u1, u2)
+    res["numba [s/run]"] = time.perf_counter() - t0
+    res["speed-up"] = t_np / res["numba [s/run]"]
+    res["python-vs-numba max |diff| [mm/d]"] = float(np.max(np.abs(Qn - Qs)))
+except Exception as ex:
+    res["numba"] = f"unavailable: {type(ex).__name__}: {ex}"
+res["UH ordinate sums (must be 1)"] = f"{u1.sum():.12f} / {u2.sum():.12f}"
+res["NSE, DEFAULT (uncalibrated) parameters, calibration metric window"] = float(nse(Qs[mask], Qobs[mask]))
+res["KGE, DEFAULT parameters"] = float(kge_components(Qs[mask], Qobs[mask])["KGE"])
+res["mean sim / mean obs"] = float(Qs[mask].mean() / Qobs[mask].mean())
+pd.Series(res).to_frame("value")
+```
+
+```{python}
+#| label: fig-budget
+#| fig-cap: "Wall-clock budget for a global search. Bars show the estimated time for 10,000 / 50,000 / 100,000 model evaluations given the measured GR4J cost and the per-model cost factors assumed in the text; the dashed line is the 3 h limit of config/project.yaml."
+per_run = res.get("numba [s/run]", res["numpy/python loop [s/run]"])
+factors = {"2 GR4J": 1.0, "3 HBV": 1.2, "4 SAC-SMA": 4.0, "1 ARX-API (ridge solve)": 0.8}
+runs = [10_000, 50_000, 100_000]
+B = pd.DataFrame({f"{r//1000}k runs": {k: per_run * f * r / 3600 for k, f in factors.items()} for r in runs})
+fig, ax = plt.subplots(figsize=(8, 3.6))
+B.plot(kind="bar", ax=ax); ax.axhline(3, ls="--", c="crimson"); ax.text(3.1, 3.05, "3 h limit", color="crimson", fontsize=9)
+ax.set_ylabel("wall time [h], single core"); ax.set_title("Estimated global-search cost (single core; LR_N_JOBS cores divide it)")
+plt.xticks(rotation=12); plt.tight_layout(); plt.savefig(FIG / "a03_compute_budget.png", dpi=150, bbox_inches="tight"); plt.show()
+B.round(3)
+```
+
+Cost factors are estimates: HBV has fewer operations per step than GR4J but an extra convolution
+(≈1.2×); SAC-SMA runs $N_{\text{inc}}$ sub-steps per day (typically 1–10 on wet days, ≈4× on average);
+slot 1 costs one feature build plus a $22\times22$ Cholesky solve. Slot 5 is not in the bar chart because
+it is trained, not searched: ~41 minibatches/epoch × ≤200 epochs × 5 seeds.
+
+# Pre-declared ensembles for a16 {#sec-ensembles}
+
+These are declared **now**, before any calibration result exists, so that no evaluation or hindsight
+information can influence them (CLAUDE.md rule 3 and `config/project.yaml → ensembles_and_hybrids_allowed`).
+They are stored verbatim in `config/models.yaml → ensembles:`.
+
+```{python}
+#| label: tbl-ens
+#| tbl-cap: "Pre-declared ensembles. All weights are either fixed a priori or fitted on calibration data only."
+pd.DataFrame([{"id": e["id"], "members (slots)": str(e["members"]),
+               "weights": str(e["weights"]), "rationale": e["description"]} for e in MODELS["ensembles"]])
+```
+
+`ens_nnls_calibration` is the only one with fitted weights: non-negative least squares of the five
+simulated series against observed $Q$ on the **internal validation** window 1981-10-01…1988-09-30
+(2,557 days, never used to fit any member's parameters), rescaled to sum to 1. This follows the classical
+multi-model combination results of @shamseldin1997 and mirrors the hybrid-model gains reported by
+@konapala2020, without incurring the implementation risk of a differentiable hybrid (@sec-why).
+
+# Hypotheses to be tested in a16 {#sec-hypotheses}
+
+Stated now so that a16 reports a falsification, not a post-hoc story. All refer to KGE/NSE on the
+evaluation metric window 1949-01-01…1951-09-30 (1,003 days) unless stated otherwise.
+
+```{python}
+#| label: tbl-hyp
+#| tbl-cap: "Pre-registered hypotheses."
+H = pd.DataFrame([
+ ("H1", "Complexity pays off, but with sharply diminishing returns",
+  "NSE(slot 1) < NSE(slot 2) and NSE(slot 4) - NSE(slot 2) < 0.05, i.e. going from 4 to 15 parameters buys less than going from a regression to GR4J."),
+ ("H2", "Two subsurface time scales matter",
+  "Slots 3 and 4 (two slow stores) beat slot 2 (one) specifically on low flows: higher KGE on the Jul-Oct sub-period and smaller bias at Q < Q50 = 0.45 mm/d; the difference on annual peaks is < 0.02 NSE."),
+ ("H3", "SAC-SMA's advantage is at low flows, not at peaks",
+  "NSE(slot 4) > NSE(slot 2) in log space and on Jun-Sep, but NOT on the 20 largest evaluation days."),
+ ("H4", "The LSTM wins on calibration but loses relative ground on evaluation",
+  "NSE_cal(slot 5) is the highest of the five, while NSE_cal - NSE_eval is larger for slot 5 than for slots 2-4 (the evaluation window is 1.29x wetter, a02)."),
+ ("H5", "Every model shows KGE alpha < 1 and beta < 1 on evaluation",
+  "Because calibration is drier; a01 predicts alpha < 1. If a model shows beta > 1.05 it is compensating a structural ET error."),
+ ("H6", "The multi-model mean beats the best single model",
+  "KGE(ens_mean_all5) >= max_i KGE(slot i) - 0.01, and KGE(ens_nnls_calibration) > max_i KGE(slot i)."),
+ ("H7", "Physics + ML is the best combination",
+  "KGE(ens_physics_plus_ml) > KGE(ens_mean_conceptual): the gain comes from family diversity, not from averaging per se."),
+ ("H8", "GR4J's exchange term is doing structural work, not physics",
+  "The calibrated |x2| exceeds 1 mm/d (i.e. > 20 % of mean Q = 1.35 mm/d) while a01 finds no evidence of inter-catchment transfer in a HCDN-2009 reference basin."),
+], columns=["#", "Hypothesis", "Falsifiable statement"])
+H
+```
+
+# Build-phase evidence that puts H1 at risk {#sec-h1-risk}
+
+::: {.callout-important}
+## Added after P4 by the orchestrator, on the user's instruction
+
+This section was **not** written by a03 during model design. It was added once all five slots had been
+built (phase P4) because the build-phase numbers already bear on hypothesis **H1** in
+@sec-hypotheses, and pre-registration is worthless if inconvenient evidence is quietly folded in later.
+The finding was raised by a05 as **ISSUE-004** in `context/ISSUES.md`.
+:::
+
+## The finding
+
+H1 predicts `NSE(slot 1) < NSE(slot 2)`: the 19-coefficient ARX–API ridge regression was included as the
+*floor* of the complexity gradient, with an expected calibration band of NSE 0.60–0.75
+(@tbl-summary). It does not behave like a floor.
+
+```{python}
+#| label: tbl-h1-risk
+#| tbl-cap: "Build-phase performance of the five slots at their DEFAULT (uncalibrated) settings, calibration metric window 1952-10-01..1988-09-30 (13,149 d). Read live from the builders' handoff JSONs. Slot 5 is a 30-of-200-epoch smoke run, so it is a lower bound; slots 2-4 are pure defaults and will improve substantially under calibration."
+import json, pandas as pd
+rows = []
+for agent, slot, name, band in [("a05", 1, "ARX-API ridge", "0.60-0.75"),
+                                ("a06", 2, "GR4J",          "0.78-0.86"),
+                                ("a07", 3, "HBV-light",     "0.80-0.87"),
+                                ("a08", 4, "SAC-SMA",       "0.82-0.88"),
+                                ("a09", 5, "LSTM",          "0.85-0.92")]:
+    k = json.load(open(ROOT / "context" / "handoffs" / f"{agent}.json")).get("key_numbers", {})
+    rows.append({"slot": slot, "model": name,
+                 "objective": k.get("smoke_objective_cal_default"),
+                 "KGE": k.get("smoke_KGE_cal_default"),
+                 "NSE": k.get("smoke_NSE_cal_default"),
+                 "a03 expected NSE_cal": band})
+pd.DataFrame(rows).set_index("slot")
+```
+
+At its *default* hyperparameters slot 1 reaches **NSE 0.8425 / KGE 0.8849** on the calibration metric
+window — above the top of its predicted band and above every conceptual slot at *their* defaults. The
+comparison that matters more is out-of-sample: fitted on internal train (1952-10-01…1981-09-30) and scored
+on internal validation (1981-10-01…1988-09-30), slot 1 gives **KGE 0.8718 / NSE 0.8590**
+(objective 0.8654). For scale, a01's independent benchmarks *at this same gauge* are calibrated SAC-SMA
+NSE 0.796, calibrated HBV 0.819, and a regional LSTM 0.84–0.86.
+
+So a linear model in transformed space, with no soil-moisture store and no mass balance, is currently
+sitting inside the band that published deep-learning models occupy on this basin.
+
+## Why this is not leakage
+
+An out-of-band result of this kind is usually a leak, so it was checked structurally rather than argued
+away. Four things were verified in `src/models/model_1.py`:
+
+1. **Observed discharge never enters the design matrix.** The regressors are precipitation, PET and
+   exponentially-weighted antecedent-precipitation indices. The "AR" in ARX is autoregression in the API
+   *state*, not on observed $Q$ — so the model remains comparable with the conceptual slots, which is
+   exactly what `config/project.yaml -> ml_state_note` requires.
+2. **The multiplicative bias factor $c$ is frozen at fit time.** It is computed once inside `fit()` from
+   the fitting window and only *read* in `simulate()`. It is not recomputed from the window being
+   predicted — which would have been a textbook leak, and would have manufactured $\beta \approx 1$ on any
+   period.
+3. **Column means and standard deviations are likewise frozen** in `_fitted` and restored by `load()`.
+4. **The lazy-fit fallback routes to the calibration window** through the guarded loader, never to the
+   window passed to `simulate()`. The leak-safe path is the default, not an option.
+
+The evaluation window played no part in any of this: `src/common/data.py` raises `PermissionError` unless
+`LR_AGENT=a16`, and no test or model sets that variable.
+
+## What it does and does not imply
+
+It does **not** yet falsify H1. Two reasons to withhold judgement until a16:
+
+- These are calibration-period and *internal-validation* numbers. H1 is stated on the evaluation metric
+  window 1949-01-01…1951-09-30, which no agent except a16 may touch.
+- That window is the **wettest stretch of the record** — mean $Q$ ratio 1.29 versus calibration, runoff
+  ratio 0.41 against 0.35 (a02). A regression carries no mass balance and no storage ceiling, so it has
+  more room to degrade under a wetness shift than a conceptual model does. The conceptual slots also
+  arrive at a16 *calibrated*, whereas the numbers above are mostly defaults.
+
+What it does imply is that the interesting question has moved. The study was designed to measure how much
+complexity buys; it may instead measure **how little**. If slot 1 holds its ground on the evaluation
+window, the honest headline is that on a humid, energy-limited, snow-free basin with 40 years of clean
+forcing, a well-posed linear model in transformed space is competitive with conceptual hydrology — and
+H1, as pre-registered, is falsified in its first clause.
+
+a16 must report that outcome plainly if it occurs, including the possibility that
+`NSE(slot 1) > NSE(slot 4)`. A pre-registered hypothesis that fails is a result, not an error.
+
+# Instructions to downstream agents {#sec-a10}
+
+## Builders a05–a09
+
+* Subclass `src.common.model_api.BaseModel`; set `model_id` to the slot `id` and `kind` exactly as in
+  `config/models.yaml`. `simulate()` returns a `pd.Series` of mm/day **on the full input index**
+  (warm-up included), deterministic given parameters and seed.
+* **Read parameter bounds/defaults from `config/models.yaml`, do not hard-code them**; expose them through
+  `param_specs()` as `ParamSpec` objects (`log_scale=True` where the YAML says so).
+* Load data only via `src.common.data`; never call `slice_run(..., "evaluation")`.
+* Ship the mass-balance test of your section as a `pytest` case in `tests/test_model_N.py`, plus
+  (i) a determinism test (two identical calls give bitwise-identical output), (ii) a bounds test
+  (`defaults()` inside `bounds()`), (iii) a 200-day dry-spell recession test against the analytic solution
+  where one exists.
+* Integer-valued parameters (`integer: true` in the YAML) must be rounded inside the model, so the
+  optimizer can keep searching a continuous box.
+
+## Optimizer advisor a10
+
+```{python}
+#| label: tbl-a10
+#| tbl-cap: "What a10 needs: dimensionality, smoothness and the applicable search class per slot."
+A = pd.DataFrame([
+ (1, "arx_api_ridge", 7, "smooth in lam_*/bc_lambda, PIECEWISE-CONSTANT in n_lag (integer)",
+  "Inner problem is closed form; only 7 hyperparameters. A coarse grid / Sobol + Nelder-Mead or DE with a small budget (<= 2,000 evaluations) suffices. Gradients not available (integer + refit)."),
+ (2, "gr4j", 4, "continuous and mostly smooth; mild non-smoothness from ceil(x4) and the max(0,.) clips",
+  "Classic SCE-UA / DE territory. 4 parameters, ~1e4 evaluations is plenty; run multi-start to map equifinality between x1 and x3."),
+ (3, "hbv_light", 9, "NON-SMOOTH: the UZL threshold and the K-ordering maps max()/min() create kinks",
+  "Derivative-free global search only (SCE-UA, DE, DDS). Expect a flat ridge in (UZL, K0) - report the marginal sensitivity, not just the optimum."),
+ (4, "sacsma", 15, "NON-SMOOTH and high-dimensional: thresholds, store caps, and the integer N_inc switch",
+  "This is the original SCE-UA benchmark problem (Duan et al. 1992) - use SCE-UA with >= 2*15+1 complexes or DE with a large population; budget 5e4-1e5 evaluations. Numba is mandatory to stay inside 3 h."),
+ (5, "lstm_seq2seq", 10, "network weights: SMOOTH, gradient-based (Adam). Hyperparameters: mixed integer, expensive (~10-20 min per full training)",
+  "Two-level problem: Adam for the weights (do NOT hand the weights to a global optimizer), and <= 25 hyperparameter trials with Optuna TPE / random search on the internal-validation loss. Early stopping counts as part of the fit."),
+], columns=["Slot", "id", "#par", "Response-surface character", "Recommendation"])
+A
+```
+
+Additional notes for a10: (i) every slot's parameters are bounded and the box is rectangular by
+construction (the HBV ordering and all integer parameters are handled *inside* the models); (ii) a02 warns
+that the NSE/KGE surface is dominated by a handful of flood years (WY1961, WY1974, WY1980), so multi-start
+and a seeded, reproducible search are essential; (iii) the internal train/validation split
+(1952-10-01…1981-09-30 / 1981-10-01…1988-09-30) is available through
+`src.common.data.internal_mask` and must be used for any early stopping or hyperparameter choice.
+
+## Evaluator a16
+
+The five slots plus the five ensembles of @sec-ensembles are the complete list of things to score. Report
+KGE and NSE only, with the KGE decomposition ($r$, $\alpha$, $\beta$) as supporting detail, and test the
+hypotheses of @sec-hypotheses explicitly. Remember that all models see only 92 warm-up days in the
+evaluation window while SAC-SMA's primary store has $\tau\approx250$ d — the initial-state rule of each
+slot (all parameter-derived, listed above) is part of the model and must not be re-tuned.
+
+# Decisions recorded {#sec-decisions}
+
+1. **HYMOD replaced by HBV-light** (override of the skill's default portfolio) — justified in @sec-why by
+   the non-linear recession ($b = 1.68$), the two-time-scale evidence, the complexity-gradient gap and the
+   at-gauge NSE 0.819; the Leaf River historical lineage is preserved by SAC-SMA.
+2. **No hybrid slot; hybrids enter as pre-declared ensembles** — implementation risk of a differentiable
+   hybrid versus an equivalent scientific question answerable by `ens_physics_plus_ml`.
+3. **All initial states are parameter-derived, never observation-derived**, so the same rule applies in
+   calibration and evaluation (only 92 warm-up days exist there).
+4. **Trainable slots (1, 5) fit coefficients/weights on the internal train window and select
+   hyperparameters on the internal validation window**; slot 1 then refits its closed-form coefficients on
+   the full calibration metric window, slot 5 does not refit (early stopping needs the held-out window).
+5. **Scaling constants are frozen** at the a02 calibration-window values listed in
+   `config/models.yaml → scaling:`.
+6. **`PFREE` bound widened to 0–0.6** and **`PCTIM` narrowed to 0–0.05** relative to the DREAM Ex. 23 set
+   quoted by a01 (measured impervious cover 0.41 %).
+
+# References {.unnumbered}
+
+::: {#refs}
+:::

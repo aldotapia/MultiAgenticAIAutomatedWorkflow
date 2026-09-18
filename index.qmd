@@ -1,0 +1,321 @@
+---
+title: "Leaf River Streamflow Modeling — How This Project Works"
+subtitle: "A multi-agent study: the brief, the machinery, and what actually happened"
+---
+
+```{python}
+#| label: setup
+#| echo: false
+import json, os, sys
+from pathlib import Path
+import pandas as pd
+ROOT = Path.cwd()
+while not (ROOT / "config" / "project.yaml").exists():
+    ROOT = ROOT.parent
+sys.path.insert(0, str(ROOT)); os.chdir(ROOT)
+def handoff(a):
+    p = ROOT / "context" / "handoffs" / f"{a}.json"
+    return json.loads(p.read_text()) if p.exists() else {}
+```
+
+# Why this page exists
+
+This site is the output of an experiment in which **sixteen separate AI agents** designed, built,
+calibrated and evaluated hydrological models for one watershed, coordinating only through files on disk.
+
+The sections that follow explain the brief that started it, the vocabulary needed to read the rest of the
+site (*agent*, *orchestration*, *skill*, *context*, *handoff*), the guardrails that make the result
+trustworthy, and an honest account of what went wrong along the way. Read this first; the per-agent
+reports in the sidebar assume it.
+
+# The original brief {#sec-prompt}
+
+The project began with a single instruction from the user. It is reproduced verbatim, because everything
+downstream is either a direct consequence of it or a documented deviation from it.
+
+::: {.callout-note collapse="false"}
+## The prompt, as given
+
+> Create multi-agent orchestration configuration files to model the Leaf River watershed in Mississippi, USA.
+>
+> Goal: create the best mode that reproduce streamflow accurately
+>
+> I want the following agents:
+>
+> **Agent 1:** Characterize the watershed based on available online information.
+>
+> **Agent 2:** Describe and evaluate the data attached (LeafRiverDaily.txt), creating a Quarto report with an extensive description of the available variables
+>
+> **Agent 3:** Based on the limited information, propose a set of 5 models to use for this task. Create a Quarto document describing each model in an extensive way, including the conceptual and mathematical framework of each one (should be available in Python, or create them from scratch based on the main processes that could be interesting to represent based on the information provided by agents 1 and 2). The model it could be as basic as a simple linear regression or complex
+>
+> **Agent 4:** create a list of all the possible metrics that could be useful for this task, in a Quarto document as well, and recommend the one that suits the best for this case
+>
+> **Agents 5, 6, 7, 8, and 9:** each one in charge of building each model
+>
+> **Agent 10:** create a list of optimization algorithms (Quarto document) and recommend the best fit for this case
+>
+> **Agents 11, 12, 13, 14, and 15:** each one in charge of parameter optimization of the above models
+>
+> **Agent 16:** Evaluate the model and select the best one. For this case, report KGE and NSE metrics.
+>
+> The evaluation period should follow: Performance metric values should be computed by running the model for the period from Oct 1, 1948 through Sept 30, 1951. The first three months (Oct 1 through Dec 31) of 1948 are used as a "warm-up" period to allow for state initialization errors to be minimized – accordingly, the metric values were computed only for the period from Jan 1, 1949 to Sept 30, 1951.
+>
+> The previous period could be used as calibration
+>
+> Create the configuration files to later start working with each agent.
+>
+> You have total freedom to select the best options for this task. Create backup of the work to provide context to other agents. Create skills for every agent, in a very detailed way.
+>
+> Ask me anything that it's missing here.
+:::
+
+## One thing in the brief could not be taken literally
+
+The brief says the evaluation window is Oct 1 1948 – Sep 30 1951 and that *"the previous period could be
+used as calibration"*. **There is no previous period**: the data file begins on 1 October 1948, so the
+evaluation window sits at the very start of the record. Calibration therefore had to run *forward* from
+1 October 1951 to the end of the record in 1988. This is logged in `context/DECISIONS.md` as a scaffold-time
+decision rather than silently assumed.
+
+# The vocabulary {#sec-vocabulary}
+
+## Agent
+
+An **agent** is a language model given (a) a role, (b) a specific set of tools — read files, write files,
+run shell commands, search the web — and (c) a task, which it then carries out autonomously: deciding what
+to read, what code to write, what to check, and when it is finished.
+
+The important property is that an agent is *not* a script. It makes judgement calls. Several of the most
+consequential results in this study came from an agent deciding to do something it was not explicitly told
+to do — and several of the problems came from the same freedom.
+
+Each agent here is defined by a short Markdown file in `.claude/agents/`, e.g.:
+
+```yaml
+---
+name: a06-model-builder-2
+description: Implements model slot 2 from config/models.yaml as a tested Python module.
+tools: Read, Write, Edit, Bash, Glob, Grep
+model: opus
+skills: [a06-model-builder-2]
+---
+```
+
+## Sub-agent and context isolation
+
+Each of the sixteen agents runs as a **sub-agent**: a separate conversation with its own fresh context
+window, launched by a coordinating "orchestrator" agent. This matters for a practical reason. A language
+model has a finite context; sixteen agents' worth of exploration, dead ends and file dumps would not fit in
+one. Isolation means each agent sees only what it needs.
+
+The cost of isolation is that agents cannot talk to each other. Everything they need to share must be
+written down — which is what the rest of this machinery is for.
+
+## Orchestration and the dependency graph
+
+**Multi-agent orchestration** is the coordination layer: deciding which agents run, in what order, what
+each one needs before it can start, and what it must produce before anything downstream may begin.
+
+Here that graph lives in `orchestration.yaml`. It is a directed acyclic graph grouped into six phases;
+agents within a phase are independent and run in parallel.
+
+::: {.column-page}
+```{mermaid}
+%%| label: fig-dag
+%%| fig-cap: "The dependency graph. Agents inside a phase are independent and ran in parallel; a phase begins only when every dependency reports `done`."
+flowchart LR
+  subgraph P1["P1 · context"]
+    A01["a01<br/>watershed"]
+    A02["a02<br/>data EDA"]
+  end
+  subgraph P2["P2 · design"]
+    A03["a03<br/>5 models"]
+    A04["a04<br/>metrics"]
+  end
+  subgraph P3["P3 · search"]
+    A10["a10<br/>optimizers"]
+  end
+  subgraph P4["P4 · build"]
+    A05["a05 slot 1"]
+    A06["a06 slot 2"]
+    A07["a07 slot 3"]
+    A08["a08 slot 4"]
+    A09["a09 slot 5"]
+  end
+  subgraph P5["P5 · calibrate"]
+    A11["a11-a14<br/>slots 1-4"]
+    A15B["a15b<br/>slot 5 budgeted"]
+  end
+  A16["a16 evaluate<br/>ONLY agent allowed<br/>the held-out window"]
+  A01 --> A03
+  A02 --> A03
+  A02 --> A04
+  A03 --> A10
+  A04 --> A10
+  A03 --> A05
+  A03 --> A06
+  A03 --> A07
+  A03 --> A08
+  A03 --> A09
+  A10 --> A11
+  A05 --> A11
+  A06 --> A11
+  A07 --> A11
+  A08 --> A11
+  A09 --> A15B
+  A10 --> A15B
+  A11 --> A16
+  A15B --> A16
+```
+:::
+
+The phases are not arbitrary. Each one exists because its outputs are *inputs* to the next: you cannot
+choose an optimizer (P3) before you know what models you are optimizing (P2) or what objective you are
+maximising (P2); you cannot build a model (P4) before its equations are specified (P2).
+
+## Skill
+
+A **skill** is a detailed, reusable procedure attached to an agent — the difference between telling someone
+"do the data analysis" and handing them a laboratory protocol. Each agent here has one, in
+`.claude/skills/<agent>/SKILL.md`, typically 60–90 lines specifying the exact steps, the statistics to
+compute, the figures to produce, the checks that must pass, and the contents of its handoff.
+
+Skills are what make an agent's output *predictable* rather than merely plausible. They also encode
+institutional knowledge: a02's skill, for example, mandates a Mann–Kendall trend test, a Pettitt change-point
+test and a double-mass curve — quality checks a general instruction would not have produced.
+
+## Context, handoffs, and shared memory
+
+Because agents cannot speak to one another, the project uses a set of append-only files as shared memory:
+
+| File | Purpose |
+|---|---|
+| `context/CONTEXT.md` | Each agent appends one section on finishing: key findings with units, outputs, what downstream agents must know. |
+| `context/handoffs/aNN.json` | Machine-readable results: `key_numbers`, `assumptions`, `downstream_notes` addressed to specific later agents. |
+| `context/DECISIONS.md` | Every non-obvious choice, with the alternatives considered and the reason. |
+| `context/ISSUES.md` | Problems found in *other* agents' work. Agents never edit each other's files; they file an issue. |
+| `context/state.json` | Which agents are `pending` / `running` / `done`. Gates the whole graph. |
+| `context/backups/` + git tags | Every agent commits and tags on finishing, so any step can be rolled back. |
+
+The `downstream_notes` field deserves emphasis: it lets an agent write a message addressed to a specific
+future agent that does not exist yet. a01 left a02 a note about unit conversion; a02 left the ML builders
+the exact scaling constants they were permitted to use.
+
+# The guardrails {#sec-guardrails}
+
+A multi-agent study can fail silently. Sixteen agents each making a small, locally reasonable choice can
+collectively produce a result that is worthless. Four mechanisms were used to prevent that.
+
+**1. One way to load data, one way to score.** Every agent reads the record through
+`src/common/data.py` and computes KGE/NSE through `src/common/metrics.py`. Nobody re-implements either. The
+canonical metrics file was verified byte-identical to its original at the end of the study.
+
+**2. A hard guard on the held-out window.** The evaluation period is not merely *discouraged* — it is
+unreachable. `slice_run(df, "evaluation")` raises `PermissionError` unless the environment variable
+`LR_AGENT=a16` is set, and only the evaluator sets it:
+
+```python
+def _guard(which, allow_evaluation):
+    if which == "evaluation" and not (allow_evaluation and os.environ.get("LR_AGENT") == "a16"):
+        raise PermissionError("Evaluation period is reserved for Agent 16 (set LR_AGENT=a16).")
+```
+
+This was checked at the end rather than trusted: the guard fires, no model or optimizer code hard-codes
+evaluation dates or row indices, and every other agent's code only ever *removes* that variable.
+
+**3. A model contract.** Every model subclasses `BaseModel` with the same `simulate(forcing, params)`
+signature, units of mm/day, and determinism given parameters and seed. This is why one shared calibration
+runner could drive five structurally unrelated models, and why the evaluator could treat them uniformly.
+
+**4. Pre-registration.** Eight falsifiable hypotheses were written down in [the hypotheses section](03_models.qmd#sec-hypotheses) of the model
+report *before* any model was calibrated, so the final report adjudicates predictions rather than
+constructing a story around whatever happened.
+
+# What actually happened {#sec-what-happened}
+
+An honest account, because the failures are more instructive than the successes.
+
+## Things the agents caught that a script would not have
+
+- **a01 proved the data file's identity.** Asked only to characterize the watershed, it went further and
+  matched the `Q` column against the USGS record for gauge 02472000: **r = 1.000000** over 13,515 days. That
+  turned an ambiguity about the calendar into a measurement.
+- **a02 measured the units instead of assuming them.** It found `Q` quantised at 0.0012544 mm/day — exactly
+  1 ft³/s over 1,950 km² — confirming both the units and the basin area independently.
+- **a03 overrode its own instructions.** Told to propose five models, it rejected HYMOD (a default choice)
+  because HYMOD's single *linear* store contradicts the non-linear recession a02 had measured, and
+  substituted HBV-light with an argument.
+- **a08 chose provable correctness over fidelity.** Implementing SAC-SMA, it dropped a line from the
+  original Fortran that destroys mass, because keeping it would have made the conservation invariants
+  unprovable. It logged the deviation rather than hiding it.
+
+## Things that went wrong
+
+- **The evaluation window was initially wrong.** An early translation of the brief's calendar dates into
+  row indices produced rows 265:1360 instead of 0:1095. Both windows contain exactly 1,003 metric days,
+  which is why the error was not obvious. It was caught by cross-checking against the user's earlier study
+  and confirmed independently by PET seasonality and the USGS match (`ISSUE-001`).
+- **Agents collided on shared files.** Running five builders concurrently exposed that `backup.sh` and
+  `state.py` were not safe under parallel use — concurrent git commits fight over `index.lock`, and a
+  read-modify-write on `state.json` loses siblings' updates. Both were made atomic. Two agents also filed
+  *different* issues under the same number, which had to be renumbered.
+- **A declared compute budget was never enforced.** `config/optimization.yaml` specified a 90-minute cap
+  for the LSTM search, but the runner never read that block: `study.optimize()` was called with no
+  `timeout=`. The search ran over seven hours and produced nothing (`ISSUE-006`). It was replaced by a
+  budgeted alternative agent that enforces its deadline **in code**, which finished the same experiment in
+  7.6 minutes. The lesson is general: *a limit that lives only in a configuration file is not a limit.*
+
+## The headline result contradicted the design
+
+The study was built around a complexity gradient — regression → GR4J → HBV → SAC-SMA → LSTM — to measure
+how much complexity buys. On the held-out window the answer was **nothing**: the 26-coefficient ridge
+regression achieved the highest NSE of any candidate, and the rank correlation between number of fitted
+quantities and KGE across the five models was **−0.70**.
+
+Because the hypothesis was pre-registered, that is reported as a falsification rather than quietly
+reframed. [The H1-risk section](03_models.qmd#sec-h1-risk) of the model report was written *after the models were built but before the held-out
+window was opened*, specifically so the inconvenient evidence could not be presented as though it had been
+expected all along.
+
+# Reading order {#sec-reading-order}
+
+| # | Report | What it establishes |
+|---|---|---|
+| 01 | [Watershed](01_watershed.qmd) | Where this basin is, how it behaves, what a good model must represent |
+| 02 | [Data](02_data.qmd) | What the record contains, whether it can be trusted, what the periods really are |
+| 03 | [Models](03_models.qmd) | The five candidates, their equations, and the pre-registered hypotheses |
+| 04 | [Metrics](04_metrics.qmd) | Why the calibration objective is 0.5·KGE + 0.5·NSE |
+| 05 | [Implementation & calibration](05_implementation.qmd) | How the models were built, tested and fitted |
+| 10 | [Optimization](10_optimization.qmd) | Which search algorithm each model gets, and why |
+| 16 | [Evaluation](16_evaluation.qmd) | The held-out result, the winner, and the hypothesis verdicts |
+
+# Reproducing this {#sec-repro}
+
+```bash
+bash scripts/setup_env.sh          # conda env `leafriver`
+conda activate leafriver
+python -m pytest -q tests          # 276 tests
+python -m src.optimization.runner --slot 2 --seeds 42-51 --stage final
+quarto render reports              # this site
+```
+
+Everything is seeded (42), every period comes from `config/project.yaml`, and every agent's work is
+recoverable from a git tag listed in its handoff.
+
+```{python}
+#| label: tbl-runlog
+#| echo: false
+#| tbl-cap: "Every agent that ran, with the backup tag its work is recoverable from."
+rows = []
+names = {"a01":"watershed characterization","a02":"data EDA & QC","a03":"model proposals",
+         "a04":"metrics & objective","a05":"slot 1 build","a06":"slot 2 build","a07":"slot 3 build",
+         "a08":"slot 4 build","a09":"slot 5 build","a10":"optimization design",
+         "a11":"slot 1 calibration","a12":"slot 2 calibration","a13":"slot 3 calibration",
+         "a14":"slot 4 calibration","a15b":"slot 5 calibration (budgeted)","a16":"held-out evaluation"}
+for a, what in names.items():
+    h = handoff(a)
+    rows.append({"agent": a, "task": what,
+                 "status": h.get("status", "—"),
+                 "backup tag": (h.get("backup_tag") or "—").replace("backup/", "")})
+pd.DataFrame(rows).set_index("agent")
+```

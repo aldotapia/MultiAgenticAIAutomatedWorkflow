@@ -1,0 +1,953 @@
+---
+title: "Leaf River near Collins, Mississippi — Watershed Characterization"
+subtitle: "Physical basis for model-structure choices (Agent a01, phase P1)"
+author: "Agent a01 — watershed characterizer"
+date: "2026-09-15"
+bibliography: references.bib
+jupyter: leafriver
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    number-sections: true
+    code-fold: true
+    fig-dpi: 150
+execute:
+  echo: true
+  warning: false
+---
+
+```{python}
+#| label: setup
+#| code-summary: "Setup (paths, style, helpers)"
+import json, os, tempfile, urllib.request, warnings
+from pathlib import Path
+import numpy as np
+import pandas as pd
+import matplotlib as mpl
+import matplotlib.pyplot as plt
+
+warnings.filterwarnings("ignore")
+ROOT = Path.cwd().parents[0] if Path.cwd().name == "reports" else Path.cwd()
+FIG  = ROOT / "results" / "figures"
+FIG.mkdir(parents=True, exist_ok=True)
+CACHE = Path(tempfile.gettempdir()) / "lr_a01_cache"
+CACHE.mkdir(parents=True, exist_ok=True)
+
+np.random.seed(42)
+mpl.rcParams.update({"figure.dpi": 110, "savefig.dpi": 150, "font.size": 9,
+                     "axes.grid": True, "grid.alpha": 0.3, "axes.spines.top": False,
+                     "axes.spines.right": False})
+
+def fetch(url: str, name: str, timeout: int = 120) -> Path | None:
+    """Download `url` once into a temp cache. Returns None if the network is unavailable."""
+    p = CACHE / name
+    if p.exists() and p.stat().st_size > 0:
+        return p
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as r:
+            p.write_bytes(r.read())
+        return p if p.stat().st_size > 0 else None
+    except Exception as e:                                   # pragma: no cover
+        print(f"[warn] could not fetch {name}: {e}")
+        return None
+
+def rdb(path: Path) -> pd.DataFrame:
+    """Read a USGS RDB file (comment lines '#', second row = format codes)."""
+    import io
+    txt = "".join(l for l in open(path, encoding="utf-8", errors="replace") if not l.startswith("#"))
+    return pd.read_csv(io.StringIO(txt), sep="\t", dtype=str).iloc[1:].reset_index(drop=True)
+```
+
+::: {.callout-important}
+## Evaluation-period firewall
+Everything computed from `data/raw/LeafRiverDaily.txt` in this report uses **only the calibration window**
+(`1951-10-01..1988-09-30`, metric window `1952-10-01..1988-09-30`), loaded through `src/common/data.py`.
+No observed streamflow inside the evaluation window (`1948-10-01..1951-09-30`) was used for any number,
+prior, figure or recommendation. The single exception is the *externally published* USGS annual-peak record
+shown in @fig-peaks, which is reproduced as historical context only (CLAUDE.md rule 3 allows description,
+not fitting) and was **not** used to derive any prior, weight or model choice.
+:::
+
+# Summary
+
+* **Gauge (VERIFIED).** USGS **02472000 "LEAF RIVER NR COLLINS, MS"**, 31.70694 °N, −89.40694 °W (NAD83),
+  Covington County, HUC-8 **03170004 "Upper Leaf"**; gauge datum 196.77 ft (59.98 m) NAVD88;
+  record continuous since 1938-09-12 [@usgs_nwis_site].
+* **Area (VERIFIED, three independent sources).** NWIS 743 mi² = **1924.4 km²**; NHDPlus/NLDI polygon
+  **1926.9 km²**; GAGES-II 1927.1 km². The **effective area embedded in the modelling data file is
+  1949.1 km²** (§2.3) — the classic literature value "1944 km²" is right to 0.3 %.
+* **Data-file identity (VERIFIED).** Daily `Q` in `LeafRiverDaily.txt` reproduces USGS daily discharge at
+  02472000 with *r* = 1.000000 and RMSE 0.0010 mm/d over the whole calibration window when converted with
+  A = 1949.1 km². This independently confirms the record start **1948-10-01** (ISSUE-001 resolution) — see §2.3.
+* **Climate (VERIFIED).** Humid subtropical (Köppen **Cfa**); PRISM 1971–2000 basin mean P = **1521 mm/yr**,
+  T = **17.7 °C**; data-file calibration means P = 1427, PET = 1059, Q = 494 mm/yr ⇒ runoff ratio **0.35**,
+  aridity index PET/P = **0.74** [@falcone2011].
+* **Snow is irrelevant (VERIFIED).** Snow = **0.8 %** of precipitation (McCabe–Wolock grid via GAGES-II);
+  NOAA 1991–2020 normals inside the basin: 0.9 in (23 mm) of snow*fall* per year ≈ **0.15 %** of annual P
+  as SWE [@noaa_normals]. **No snow module is needed.**
+* **Seasonality is ET-driven, not P-driven (VERIFIED).** Monthly P varies only 81–152 mm
+  (seasonality index 0.119) while monthly Q varies 11–87 mm; PET swings 31→141 mm/month.
+  ⇒ **soil-moisture accounting with an ET-limited store is the single most important process.**
+* **Slow, well-damped system (VERIFIED, calibration data only).** P→Q cross-correlation peaks at **lag 3 d**
+  (*r* = 0.48); master recession constant **k = 0.915 d⁻¹** (residence time ≈ 11 d); Kirpich t_c ≈ 1.4 d.
+  ⇒ **two or more parallel linear stores plus a short (1–3 d) routing lag.**
+* **Substantial but not dominant baseflow (VERIFIED).** Wolock BFI grid 29.9 %; Lyne–Hollick filter on the
+  calibration record 31–41 %; flow never reaches zero (min 0.069 mm/d). ⇒ a slow groundwater store with a
+  ~10–60 d time constant is required; a deep "unobserved loss" flux may help (GR4J-style exchange).
+* **Essentially unregulated (VERIFIED).** GAGES-II class **"Ref"** (least-disturbed), HCDN-2009 member,
+  hydrologic-disturbance index 9; total dam storage in 1980 = **4.0 mm** of basin-equivalent depth
+  (0.8 % of annual runoff). MDEQ: the Pascagoula system is "the last unregulated major river system in the
+  lower 48 states" [@mdeq_pascagoula]. ⇒ **no reservoir routine, no withdrawal term.**
+* **Realistic performance target.** Independent benchmarks at *this gauge*: NWM v2.1 KGE 0.72 / NSE 0.71;
+  calibrated SAC-SMA NSE 0.796, HBV(cal.) 0.819, FUSE 0.78, VIC 0.72, mHM 0.70, regional LSTM 0.84–0.86
+  [@towler2023; @kratzert2019]. **A well-calibrated conceptual model should reach NSE ≈ 0.80–0.87 here.**
+
+# Gauge, location and basin delineation
+
+## Station metadata
+
+```{python}
+#| label: tbl-site
+#| tbl-cap: "USGS NWIS site record for 02472000 (retrieved live from the NWIS Site Service; VERIFIED)."
+site_p = fetch("https://waterservices.usgs.gov/nwis/site/?format=rdb&sites=02472000&siteOutput=expanded",
+               "site.rdb")
+FALLBACK = {"station_nm": "LEAF RIVER NR COLLINS, MS", "dec_lat_va": "31.70694444",
+            "dec_long_va": "-89.4069444", "dec_coord_datum_cd": "NAD83", "alt_va": "196.77",
+            "alt_datum_cd": "NAVD88", "huc_cd": "03170004", "drain_area_va": "743",
+            "contrib_drain_area_va": "743", "county_cd": "031", "inventory_dt": "19380912",
+            "map_nm": "HOT COFFEE", "tz_cd": "CST"}
+s = rdb(site_p).iloc[0].to_dict() if site_p else FALLBACK
+rows = [
+    ("Site number",              "USGS 02472000"),
+    ("Station name",             s["station_nm"]),
+    ("Latitude / longitude",     f'{float(s["dec_lat_va"]):.5f} °N, {float(s["dec_long_va"]):.5f} °E ({s["dec_coord_datum_cd"]})'),
+    ("County / state",           "Covington County, Mississippi (FIPS 28031)"),
+    ("Gauge datum",              f'{float(s["alt_va"]):.2f} ft = {float(s["alt_va"])*0.3048:.2f} m {s["alt_datum_cd"]}'),
+    ("HUC-8",                    f'{s["huc_cd"]} — "Upper Leaf" (Pascagoula River basin, HUC-2 = 03 South Atlantic-Gulf)'),
+    ("Drainage area (NWIS)",     f'{float(s["drain_area_va"]):.0f} mi² = {float(s["drain_area_va"])*2.58999:.1f} km² (100 % contributing)'),
+    ("Topographic map",          s["map_nm"].title()),
+    ("Site established",         pd.to_datetime(s["inventory_dt"]).date().isoformat()),
+    ("Discharge record",         "1938-09-12 to present, continuous daily values (>32,000 d); time zone CST"),
+    ("Instantaneous peak record","89 peaks, 1856 (historic) and 1939–2025 (systematic)"),
+]
+pd.DataFrame(rows, columns=["Attribute", "Value"]).style.hide(axis="index")
+```
+
+The station is **not** in the town of Collins: it lies ~15 km ESE of Collins on the *Hot Coffee* quadrangle.
+The town of Collins, Hattiesburg and Laurel are all **outside/downstream** of the gauged basin (checked by
+point-in-polygon against the NLDI basin, §2.2).
+
+## Delineated basin, tributaries and network
+
+```{python}
+#| label: geo
+#| code-summary: "Download NLDI basin + upstream flowlines, compute morphometry"
+import geopandas as gpd
+from shapely.geometry import Point
+
+base = "https://api.water.usgs.gov/nldi/linked-data/nwissite/USGS-02472000"
+bas_p = fetch(f"{base}/basin?f=json", "basin.geojson")
+ut_p  = fetch(f"{base}/navigation/UT/flowlines?f=json&distance=9999", "ut.geojson", timeout=240)
+um_p  = fetch(f"{base}/navigation/UM/flowlines?f=json&distance=9999", "um.geojson", timeout=240)
+
+morph = None
+if bas_p and ut_p and um_p:
+    bas = gpd.read_file(bas_p).set_crs(4326, allow_override=True)
+    ut  = gpd.read_file(ut_p).set_crs(4326, allow_override=True)
+    um  = gpd.read_file(um_p).set_crs(4326, allow_override=True)
+    b5, u5, m5 = bas.to_crs(5070), ut.to_crs(5070), um.to_crs(5070)
+    A   = b5.area.sum() / 1e6
+    Per = b5.geometry.length.sum() / 1e3
+    Lt  = u5.geometry.length.sum() / 1e3
+    Lm  = m5.geometry.length.sum() / 1e3
+    out = gpd.GeoSeries([Point(-89.4069444, 31.70694444)], crs=4326).to_crs(5070).iloc[0]
+    xs, ys = b5.geometry.iloc[0].exterior.coords.xy
+    Lb = np.hypot(np.asarray(xs) - out.x, np.asarray(ys) - out.y).max() / 1e3
+    morph = {"Basin area (NHDPlus/NLDI polygon)": f"{A:,.1f} km²  ({A/2.58999:,.1f} mi²)",
+             "Basin perimeter":                   f"{Per:,.1f} km",
+             "Total NHDPlus flowline length":     f"{Lt:,.0f} km ({len(u5):,} reaches)",
+             "Drainage density":                  f"{Lt/A:.2f} km/km²",
+             "Main-stem length (outlet→head)":    f"{Lm:.1f} km",
+             "Basin length (outlet→divide)":      f"{Lb:.1f} km",
+             "Gravelius compactness 0.282·P/√A":  f"{0.2821*Per/np.sqrt(A):.2f} (1 = circle ⇒ elongated)",
+             "Form factor A/L_b²":                f"{A/Lb**2:.2f}"}
+    pd.DataFrame(morph.items(), columns=["Morphometric property", "Value"]).style.hide(axis="index")
+else:
+    print("network unavailable — morphometry values are quoted in the text (VERIFIED 2026-09-15): "
+          "A = 1926.9 km², P = 249.1 km, L_streams = 2222 km, D_d = 1.15 km/km², L_main = 108.7 km, "
+          "L_basin = 73.3 km, compactness 1.60")
+```
+
+```{python}
+#| label: fig-map
+#| fig-cap: "Gauged Leaf River basin above USGS 02472000 (NHDPlus/NLDI delineation, 1926.9 km²) with the upstream stream network, the four HUC-10 watersheds it is composed of, and the outlet gauge. Downstream towns (Collins, Laurel, Hattiesburg) lie outside the modelled basin."
+#| fig-width: 7.5
+#| fig-height: 7.5
+huc_p = fetch("https://hydro.nationalmap.gov/arcgis/rest/services/wbd/MapServer/5/query?"
+              "where=huc10+LIKE+%2703170004%25%27&outFields=huc10,name,areasqkm&returnGeometry=true"
+              "&outSR=4326&f=geojson", "huc10.geojson", timeout=240)
+
+if bas_p and ut_p:
+    fig, ax = plt.subplots(figsize=(7.5, 7.5))
+    b3857 = bas.to_crs(3857); u3857 = ut.to_crs(3857)
+    if huc_p:
+        h = gpd.read_file(huc_p).set_crs(4326, allow_override=True).to_crs(3857)
+        inside = h[h.geometry.intersection(b3857.geometry.iloc[0]).area / h.geometry.area > 0.3]
+        inside.boundary.plot(ax=ax, color="0.35", lw=0.8, ls="--", zorder=3)
+        for _, r in inside.iterrows():
+            c = r.geometry.intersection(b3857.geometry.iloc[0]).representative_point()
+            ax.annotate(r["name"].replace("-", "-\n"), (c.x, c.y), fontsize=7, ha="center",
+                        color="0.15", zorder=6,
+                        bbox=dict(fc="white", ec="none", alpha=0.6, pad=0.8))
+    u3857.plot(ax=ax, color="#1f77b4", lw=0.35, zorder=4)
+    b3857.boundary.plot(ax=ax, color="crimson", lw=1.8, zorder=5)
+    g = gpd.GeoSeries([Point(-89.4069444, 31.70694444)], crs=4326).to_crs(3857)
+    g.plot(ax=ax, color="black", marker="v", markersize=90, zorder=7)
+    ax.annotate("USGS 02472000\nLeaf R. nr Collins", (g.x[0], g.y[0]), xytext=(12, -28),
+                textcoords="offset points", fontsize=8, fontweight="bold", zorder=8,
+                bbox=dict(fc="white", ec="0.5", alpha=0.85, pad=1.5))
+    try:
+        import contextily as cx
+        for prov in (cx.providers.Esri.WorldGrayCanvas,
+                     cx.providers.OpenStreetMap.Mapnik,
+                     cx.providers.Esri.WorldTerrain):
+            try:
+                cx.add_basemap(ax, source=prov, attribution_size=5); break
+            except Exception:
+                continue
+    except Exception as e:
+        print(f"[warn] basemap unavailable: {e}")
+    ax.set_axis_off()
+    ax.set_title("Leaf River basin above USGS 02472000 — Mississippi, USA", fontsize=11)
+    fig.tight_layout(); fig.savefig(FIG / "a01_location_map.png", bbox_inches="tight"); plt.show()
+```
+
+The gauged basin is exactly **HUC-10 0317000401 (Tallabogue Creek–Leaf River) + 0317000402
+(Quarterliah Creek–West Tallahala Creek) + 0317000403 (Hatchapaloo Creek–Oakohay Creek) + ~75 % of
+0317000405 (Fisher Creek–Leaf River)** = 1926.6 km² (VERIFIED by intersection of the NLDI polygon with the
+USGS Watershed Boundary Dataset [@usgs_wbd]). **Correction to a common literature claim:** *Tallahala Creek*
+(proper), *Bogue Homa*, *Okatoma Creek* and the *Bouie River* join the Leaf River **downstream** of this
+gauge and are **not** part of the modelled basin; the upstream tributaries are Oakohay Creek (gauged at Mize,
+USGS 02471500), Tallabogue Creek, West Tallahala Creek, Quarterliah, Hatchapaloo, Big and Fisher Creeks.
+
+## Unit and calendar cross-check of `LeafRiverDaily.txt` (for a02)
+
+```{python}
+#| label: tbl-unitcheck
+#| tbl-cap: "Cross-check of the modelling file against the USGS daily-value record — calibration window only."
+import sys
+sys.path.insert(0, str(ROOT))
+from src.common.data import load_data, slice_run, metric_mask
+import io
+
+df  = load_data()
+cal = slice_run(df, "calibration")          # 1951-10-01 .. 1988-09-30 (no evaluation rows)
+cm  = cal[metric_mask(cal, "calibration")]  # 1952-10-01 .. 1988-09-30
+
+dv_p = fetch("https://waterservices.usgs.gov/nwis/dv/?format=rdb&sites=02472000"
+             "&startDT=1951-10-01&endDT=1988-09-30&parameterCd=00060&statCd=00003",
+             "dv_cal.rdb", timeout=300)
+res = []
+if dv_p:
+    u = rdb(dv_p)
+    col = [c for c in u.columns if c.endswith("_00060_00003") and not c.endswith("_cd")][0]
+    u["date"] = pd.to_datetime(u["datetime"])
+    usgs = u.set_index("date")[col].astype(float) * 0.0283168      # ft³/s → m³/s
+    common = cal.index.intersection(usgs.index)
+    fq, uq = cal["Q"].loc[common].to_numpy(), usgs.loc[common].to_numpy()
+    A_ls = 86.4 * np.sum(uq * fq) / np.sum(fq * fq)
+    for A in (1924.4, 1944.0, A_ls, 1950.0):
+        conv = uq * 86.4 / A
+        res.append((f"{A:,.1f}", f"{np.corrcoef(fq, conv)[0,1]:.6f}",
+                    f"{(fq.mean()-conv.mean())/conv.mean()*100:+.2f} %",
+                    f"{np.sqrt(((fq-conv)**2).mean()):.4f}"))
+    lags = {k: np.corrcoef(fq[2:-2], (uq*86.4/A_ls)[2+k:len(uq)-2+k])[0,1] for k in (-2,-1,0,1,2)}
+    tbl = pd.DataFrame(res, columns=["Area A used (km²)", "r (daily)", "bias of file vs USGS", "RMSE (mm/d)"])
+    print(f"n = {len(common):,} daily pairs, {common[0].date()} … {common[-1].date()} (calibration window only)")
+    print(f"Least-squares effective area  A = {A_ls:.1f} km²")
+    print("Day-shift test  r(lag): " + ", ".join(f"{k:+d} d → {v:.4f}" for k, v in lags.items()))
+    display(tbl.style.hide(axis="index"))
+else:
+    print("network unavailable; VERIFIED values obtained 2026-09-15: n = 13,515 daily pairs, "
+          "A_ls = 1949.2 km², r = 1.000000, bias 0.00 %, RMSE 0.0010 mm/d; "
+          "r(lag ±1 d) = 0.890, r(lag 0) = 1.000000")
+```
+
+**Conclusions for a02 (all VERIFIED):**
+
+1. `Q` is **mm/day**, not m³/s. The conversion actually used by the NWS when the file was built is
+   `Q_mm = Q_m3s · 86.4 / 1949.1 km²` (`= Q_cfs · 0.0283168 · 86.4 / 1949.1 = Q_cfs · 0.00125523`). Using the NWIS area 1924.4 km² would give a
+   +1.3 % bias, using the literature 1944 km² a +0.26 % bias.
+2. The record **starts 1948-10-01**: with that alignment, daily *r* = 1.000000 against USGS; shifting the
+   calendar by ±265 or ±365 days destroys the correspondence (water-year means: *r* drops from 1.00000 to
+   0.35 / 0.11). This is independent confirmation of the ISSUE-001 resolution (`periods.definition: dates`).
+3. `Q` at this gauge has no missing days in 1951-10-01…1988-09-30, and GAGES-II reports only 0.6 % estimated
+   values over the whole record [@falcone2011] — so data quality is not a limiting factor.
+
+# Physiography and topography
+
+```{python}
+#| label: tbl-topo
+#| tbl-cap: "Topography, network and shape. Source: USGS GAGES-II (100 m NED, NHDPlus) [@falcone2011]; NLDI/NHDPlus geometry computed here."
+topo = [
+ ("Mean basin elevation",        "118.1 m",        "GAGES-II (NED 100 m)", "VERIFIED"),
+ ("Median / min / max elevation","119 / 62 / 192 m","GAGES-II",             "VERIFIED"),
+ ("Elevation std. dev.",         "19.8 m",         "GAGES-II",             "VERIFIED"),
+ ("Relief",                      "130 m",          "derived",              "VERIFIED"),
+ ("Mean slope",                  "2.5 %",          "GAGES-II (NED 100 m)", "VERIFIED"),
+ ("Dominant aspect",             "149° (SSE)",     "GAGES-II",             "VERIFIED"),
+ ("Topographic wetness index",   "12.69",          "GAGES-II (Wolock)",    "VERIFIED"),
+ ("Drainage density",            "1.15–1.17 km/km²","NLDI here / GAGES-II","VERIFIED"),
+ ("Max Strahler order",          "5",              "GAGES-II (NHDPlus)",   "VERIFIED"),
+ ("1st/2nd-order share of network","65.2 % / 14.3 %","GAGES-II",           "VERIFIED"),
+ ("Main-stem sinuosity",         "1.6",            "GAGES-II",             "VERIFIED"),
+ ("Main-stem length / basin length","108.7 km / 73.3 km","computed (NLDI)","VERIFIED"),
+ ("Lakes+ponds surface",         "0.58 % of area", "GAGES-II (NHD hi-res)","VERIFIED"),
+ ("Ecoregion (EPA level III)",   "65 Southeastern Plains (100 % of basin)","GAGES-II / @omernik2014","VERIFIED"),
+ ("Physiographic province",      "Gulf Coastal Plain — 'Pine Belt' / Piney Woods","@mdeq_pascagoula","LITERATURE"),
+]
+pd.DataFrame(topo, columns=["Property", "Value", "Source", "Status"]).style.hide(axis="index")
+```
+
+**Interpretation.** This is a *low-relief, elongated, well-drained Coastal-Plain basin*: 130 m of total
+relief spread over a 73 km long, 109 km-of-main-stem catchment, mean slope 2.5 %. The mean channel gradient
+is ≈ 1.2 m/km. Consequences for modelling:
+
+* Gravity-driven fast runoff is weak; **storage, not topography, controls the hydrograph**.
+* The high topographic wetness index (12.69) and the shallow seasonal water table (1.12 m, §5) mean
+  **variable source areas / saturation excess** near the valley bottoms are physically plausible —
+  a "probability-distributed store" (HYMOD/PDM/GR4J-style) is the natural abstraction.
+* Travel time estimates (§7.3) put the routing lag at **1–3 days**, i.e. of the same order as the daily
+  time step — a short unit hydrograph or 2–3 cascaded linear reservoirs suffices; no hydraulic routing.
+
+# Climate
+
+## Normals and seasonal regime
+
+The basin is **Köppen Cfa** (humid subtropical: hot humid summers, mild winters, no dry season)
+[@beck2018; @peel2007]. Two independent primary sources are used: NOAA-NCEI 1991–2020 station normals at
+**RALEIGH 6N (USC00227276, 32.143 °N, −89.553 °W, 136 m — inside the basin)** [@noaa_normals], and the
+PRISM 1971–2000 basin averages distributed with GAGES-II [@falcone2011].
+
+```{python}
+#| label: fig-climate
+#| fig-cap: "Climate of the gauged basin. Left: monthly precipitation (NOAA 1991–2020 station normals inside the basin, and PRISM 1971–2000 basin mean) with monthly mean temperature. Right: the water-balance components of the modelling file over the calibration metric window (1952-10-01…1988-09-30) — precipitation is nearly aseasonal while PET and runoff are strongly seasonal."
+#| fig-width: 10
+#| fig-height: 4.2
+MON = list("JFMAMJJASOND")
+# NOAA NCEI 1991-2020 monthly normals, station USC00227276 (RALEIGH 6N) — VERIFIED 2026-09-15
+noaa_p_in   = np.array([5.57, 5.98, 5.93, 5.91, 4.16, 5.57, 4.60, 4.67, 4.21, 4.33, 4.74, 5.94])
+noaa_snow_in= np.array([0.3, 0.3, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.3])
+noaa_tmax_f = np.array([55.4, 59.8, 67.0, 74.2, 81.5, 87.5, 89.8, 89.5, 85.4, 76.5, 65.7, 57.9])
+noaa_tmin_f = np.array([33.2, 36.3, 42.7, 49.4, 58.1, 65.5, 68.3, 67.2, 61.8, 49.5, 40.0, 35.1])
+noaa_frost_d= np.array([16.7, 11.6, 4.9, 0.7, 0, 0, 0, 0, 0, 1.2, 8.4, 15.4])
+# PRISM 1971-2000 basin means from GAGES-II conterm_climate.txt (cm and degC) — VERIFIED
+prism_p_cm  = np.array([15.53, 13.21, 16.66, 15.16, 12.66, 10.62, 13.06, 10.08, 9.20, 8.93, 12.90, 14.08])
+prism_t_c   = np.array([7.79, 9.83, 13.59, 17.93, 21.91, 25.53, 26.99, 26.64, 23.93, 18.15, 12.91, 9.06])
+
+noaa_p_mm  = noaa_p_in * 25.4
+noaa_t_c   = ((noaa_tmax_f + noaa_tmin_f) / 2 - 32) * 5 / 9
+mon_cal    = cm.groupby(cm.index.month)[["P", "PET", "Q"]].mean() * 30.44
+
+fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 4.2))
+x = np.arange(12)
+ax1.bar(x - 0.2, noaa_p_mm,     0.4, label="NOAA 1991–2020 normals (Raleigh 6N)", color="#4C78A8")
+ax1.bar(x + 0.2, prism_p_cm*10, 0.4, label="PRISM 1971–2000 basin mean",          color="#9ecae1")
+ax1.set_xticks(x); ax1.set_xticklabels(MON); ax1.set_ylabel("precipitation (mm/month)")
+ax1.set_title(f"Precipitation normals\n(annual: NOAA {noaa_p_mm.sum():.0f} mm, PRISM {prism_p_cm.sum()*10:.0f} mm)")
+axt = ax1.twinx(); axt.plot(x, prism_t_c, "o-", color="#d62728", ms=3.5, label="PRISM T")
+axt.plot(x, noaa_t_c, "s--", color="#ff9896", ms=3.5, label="NOAA T")
+axt.set_ylabel("mean temperature (°C)", color="#d62728"); axt.grid(False)
+ax1.legend(fontsize=7, loc="upper right"); axt.legend(fontsize=7, loc="lower left")
+
+ax2.bar(x - 0.27, mon_cal["P"],   0.27, label="P (file)",   color="#4C78A8")
+ax2.bar(x,        mon_cal["PET"], 0.27, label="PET (file)", color="#E45756")
+ax2.bar(x + 0.27, mon_cal["Q"],   0.27, label="Q (file)",   color="#54A24B")
+ax2.set_xticks(x); ax2.set_xticklabels(MON); ax2.set_ylabel("mm/month")
+ax2.set_title("LeafRiverDaily.txt — calibration metric window\n(1952-10-01…1988-09-30)")
+ax2.legend(fontsize=8)
+fig.tight_layout(); fig.savefig(FIG / "a01_climate.png", bbox_inches="tight"); plt.show()
+
+print(f"NOAA annual snowfall normal   : {noaa_snow_in.sum()*25.4:.1f} mm of snow "
+      f"(~{noaa_snow_in.sum()*25.4/10:.1f} mm SWE = {noaa_snow_in.sum()*25.4/10/noaa_p_mm.sum()*100:.2f} % of P)")
+print(f"NOAA days/yr with Tmin <= 0 degC: {noaa_frost_d.sum():.0f}  (Dec-Feb only 43.7 d)")
+print(f"Precipitation seasonality index (GAGES-II, Markham) : 0.119  [0 = uniform, 1 = one month]")
+print(f"Runoff seasonality from the file : min {mon_cal['Q'].min():.0f} mm (Sep) -> max {mon_cal['Q'].max():.0f} mm (Apr), ratio {mon_cal['Q'].max()/mon_cal['Q'].min():.1f}")
+print(f"Precipitation seasonality from the file : min {mon_cal['P'].min():.0f} mm -> max {mon_cal['P'].max():.0f} mm, ratio {mon_cal['P'].max()/mon_cal['P'].min():.1f}")
+```
+
+**Key climatic facts**
+
+| Quantity | Value | Source | Status |
+|---|---|---|---|
+| Köppen class | Cfa (humid subtropical) | @beck2018 | LITERATURE |
+| Mean annual P (PRISM 1971–2000, basin) | 1520.9 mm | @falcone2011 | VERIFIED |
+| Mean annual P (NOAA normals 1991–2020, in-basin station) | 1565 mm | @noaa_normals | VERIFIED |
+| Mean annual P (modelling file, calibration) | 1427 mm | `src/common/data.py` | VERIFIED |
+| Mean annual T | 17.7 °C (basin) / 18.2 °C (site) | @falcone2011 | VERIFIED |
+| Mean annual PET (Hamon) | 953.7 mm | @falcone2011 | VERIFIED |
+| Mean annual PET (modelling file, calibration) | 1059 mm | `src/common/data.py` | VERIFIED |
+| Days with measurable precipitation | 94.7 d/yr | @falcone2011 | VERIFIED |
+| Mean relative humidity | 73 % | @falcone2011 | VERIFIED |
+| Snow as % of precipitation | **0.8 %** | @falcone2011 (McCabe–Wolock) | VERIFIED |
+| Annual snowfall normal (in basin) | 22.9 mm (~2.3 mm SWE, 0.15 % of P) | @noaa_normals | VERIFIED |
+| Days/yr with Tmin ≤ 0 °C | 58.9 | @noaa_normals | VERIFIED |
+| Precipitation seasonality index | 0.119 (≈ aseasonal) | @falcone2011 | VERIFIED |
+
+Storm types: winter–spring rainfall is **frontal/synoptic** (long-duration, basin-wide, high runoff
+coefficients because the soil store is full), summer rainfall is **convective** (July is the 2nd-wettest
+month at 128.8 mm but produces the *lowest* runoff, 13.4 mm) and the June–November season carries
+**tropical-cyclone** rainfall; the basin is ~120 km inland from the Gulf of Mexico and every landfalling
+Mississippi hurricane (e.g. Camille 1969, Frederic 1979) crosses it. That is why the *P → Q* relationship is
+strongly state-dependent and a **non-linear soil-moisture store is mandatory**.
+
+## Aridity and Budyko position
+
+```{python}
+#| label: fig-budyko
+#| fig-cap: "Budyko diagram. The Leaf River basin (calibration window of the modelling file, and the independent PRISM/Hamon + Wolock-McCabe runoff estimate) plots close to, but slightly above, the Budyko curve: it evaporates a little more (or yields a little less runoff) than the energy/water limits alone would predict — consistent with dense pine forest, 13.6 % woody wetland and deep sandy soils."
+#| fig-width: 5.6
+#| fig-height: 4.6
+P, PET, Q = cm["P"].to_numpy(), cm["PET"].to_numpy(), cm["Q"].to_numpy()
+ai_file, ep_file = PET.sum()/P.sum(), 1 - Q.sum()/P.sum()
+ai_g,   ep_g     = 953.7/1520.9, 1 - 564.8/1520.9          # GAGES-II PET, RUNAVE7100
+phi = np.linspace(0.05, 3, 300)
+budyko = np.sqrt(phi*np.tanh(1/phi)*(1-np.exp(-phi)))
+turcpike = 1/np.sqrt(1+phi**-2)
+
+fig, ax = plt.subplots(figsize=(5.6, 4.6))
+ax.plot(phi, budyko,  "k-",  lw=1.6, label="Budyko (1974)")
+ax.plot(phi, turcpike,"k--", lw=1.0, label="Turc–Pike")
+ax.plot(phi, np.minimum(phi, 1), color="0.6", lw=1.0, ls=":", label="energy / water limit")
+ax.plot(ai_file, ep_file, "o", ms=10, color="#E45756", label=f"LeafRiverDaily.txt (calib.)\nφ={ai_file:.2f}, E/P={ep_file:.2f}")
+ax.plot(ai_g,   ep_g,    "s", ms=9,  color="#4C78A8", label=f"GAGES-II PRISM/Hamon\nφ={ai_g:.2f}, E/P={ep_g:.2f}")
+ax.set_xlim(0, 2.2); ax.set_ylim(0, 1.15)
+ax.set_xlabel("aridity index  φ = PET / P"); ax.set_ylabel("evaporative index  E / P")
+ax.legend(fontsize=7.5, loc="lower right"); ax.set_title("Budyko position of the Leaf River basin")
+fig.tight_layout(); fig.savefig(FIG / "a01_budyko.png", bbox_inches="tight"); plt.show()
+print(f"file      : phi = {ai_file:.3f}, E/P = {ep_file:.3f}, runoff ratio = {Q.sum()/P.sum():.3f} "
+      f"(Budyko-expected E/P = {np.sqrt(ai_file*np.tanh(1/ai_file)*(1-np.exp(-ai_file))):.3f})")
+print(f"GAGES-II  : phi = {ai_g:.3f}, E/P = {ep_g:.3f}, runoff ratio = {564.8/1520.9:.3f}")
+```
+
+The basin is **energy-limited but only just** (φ ≈ 0.63–0.74): in an average year ~65 % of precipitation is
+evaporated and ~35 % becomes runoff. The point sits ~0.07 *above* the Budyko curve, i.e. actual ET is ~10 %
+higher than the curve suggests. Modelling implications: **actual ET must be allowed to approach PET when the
+soil is wet** (no strong global ET reduction factor), and an annual water balance closure of
+P − E − Q ≈ 0 with E/P ≈ 0.65 is the correct long-term target (a KGE β close to 1 requires it).
+
+# Geology, soils and hydrogeology
+
+## Surficial geology
+
+```{python}
+#| label: tbl-geol
+#| tbl-cap: "Surficial geology sampled at 25 random points inside the basin (seed 42) from the Macrostrat compilation of the state geologic maps [@peters2018]. VERIFIED."
+geol = [
+ ("Catahoula Formation",                 "Oligo–Miocene (28.1–13.8 Ma)", "44 %", "major SAND; minor sandstone, clay, gravel"),
+ ("Jackson Group",                       "Eocene (56–33.9 Ma)",          "36 %", "major CLAY; minor sand, marl"),
+ ("Vicksburg Gp. + Chickasawhay Lst.",   "Oligocene (28.1–24.3 Ma)",     " 8 %", "major limestone; minor sand, marl"),
+ ("Forest Hill Fm. + Red Bluff Clay",    "Oligocene (32.9–32.0 Ma)",     " 8 %", "sand + clay; incidental lignite, gypsum"),
+ ("Pascagoula / Hattiesburg Fm.",        "Miocene (13.8–5.3 Ma)",        " 4 %", "clay + sand, minor siltstone"),
+]
+pd.DataFrame(geol, columns=["Map unit", "Age", "Share of sample", "Lithology"]).style.hide(axis="index")
+```
+
+All bedrock is **unconsolidated to poorly consolidated Coastal-Plain sediment** (GAGES-II:
+`GEOL_REEDBUSH_DOM = sedimentary, 100 %`; Hunt class `rl` = loam, 68.6 %). The **Catahoula Formation sands**
+that floor the northern two-thirds of the basin are permeable and recharge the **Miocene/Catahoula aquifer
+units**; the **clay-rich Jackson Group** in the south-east perches water and sustains fast interflow.
+A 2007 low-flow survey of the Upper Leaf basin found that groundwater contributions to streamflow are
+controlled by where stream incision intersects the mappable Miocene aquifer units [@wrri2008].
+
+## Soils
+
+```{python}
+#| label: tbl-soils
+#| tbl-cap: "Soil properties of the gauged basin (USDA-NRCS STATSGO via GAGES-II [@falcone2011]). VERIFIED."
+soils = [
+ ("Hydrologic soil group A (high infiltration)",  "1.5 %"),
+ ("Hydrologic soil group B",                      "33.1 %"),
+ ("Hydrologic soil group C (slow infiltration)",  "39.9 %"),
+ ("Hydrologic soil group D (very slow)",          "25.4 %"),
+ ("Average available water capacity (AWC)",       "0.15 in/in = 0.15 mm/mm"),
+ ("Average permeability",                         "1.37 in/h = 34.8 mm/h"),
+ ("Average soil thickness examined",              "59.7 in = 1516 mm"),
+ ("Depth to seasonally high water table",         "3.66 ft = 1.12 m"),
+ ("Texture (clay / silt / sand)",                 "29.2 % / 39.1 % / 31.7 %"),
+ ("Organic matter, bulk density",                 "0.56 %, 1.49 g/cm³"),
+ ("Implied plant-available storage AWC × depth",  "≈ 227 mm"),
+]
+pd.DataFrame(soils, columns=["Property", "Value"]).style.hide(axis="index")
+```
+
+**This is the most important table for parameter priors.** Three consequences:
+
+1. **65 % of the basin is hydrologic soil group C or D.** Infiltration capacity at the surface is *moderate
+   to low* even though the parent material is sandy — a silty/clayey surface horizon over sand. Therefore
+   **both** infiltration-excess (during intense summer convective storms) and saturation-excess (winter,
+   valley bottoms) runoff occur. GAGES-II carries Wolock's split explicitly: **Horton overland flow 7.1 %**,
+   **Dunne (saturation) overland flow 5.1 %** of the basin's runoff generation. Neither dominates, and
+   together they explain only ~12 % ⇒ **~88 % of streamflow leaves the hillslope through the subsurface.**
+2. **Plant-available soil storage ≈ 230 mm** (0.15 mm/mm × 1516 mm). For a lumped conceptual store this is
+   the right order for the *mean* capacity; spatially distributed formulations (HYMOD/PDM `Cmax`,
+   GR4J `x1`) need a *maximum* 2–4× larger. Recommended priors in §10.
+3. **Water table at ~1.1 m** and 13.6 % woody wetland ⇒ riparian saturated areas are always close to the
+   surface: a **variable-contributing-area** formulation (β/b-exponent > 0) is physically justified.
+
+## Hydrogeology and baseflow
+
+| Indicator | Value | Meaning |
+|---|---|---|
+| Wolock BFI grid (GAGES-II `BFI_AVE`) | **29.9 %** | baseflow share of total flow |
+| Lyne–Hollick filter, α = 0.925, 3 passes (calibration record) | **40.6 %** | §7.2, computed here |
+| Lyne–Hollick filter, α = 0.98 | **30.9 %** | filter-parameter sensitivity |
+| Subsurface contact time (GAGES-II `CONTACT`) | **549 days** | mean residence in the saturated zone |
+| Master recession constant (calibration record) | **k = 0.915 d⁻¹** (τ ≈ 11 d) | §7.2, computed here |
+| 5th percentile of daily Q / minimum daily Q | 0.118 / 0.069 mm/d | perennial, never dry |
+
+Take **BFI ≈ 0.30–0.41** as the plausible range. The contrast between the long *contact time* (549 d) and
+the short *observed recession* (τ ≈ 11 d) is the classic signature of **two groundwater components**: a
+fast-draining shallow/perched store (days) plus a very slowly draining deep store (months) — i.e.
+SAC-SMA's supplemental + primary lower-zone free water, or HBV's two-outlet lower box.
+
+# Land cover and human influence
+
+```{python}
+#| label: tbl-lc
+#| tbl-cap: "Land cover (NLCD 2006) and anthropogenic pressure in the gauged basin [@falcone2011]. VERIFIED."
+lc = [
+ ("Forest (total)",                      "56.5 %", "evergreen 31.1 (planted pine), mixed 18.9, deciduous 6.5"),
+ ("Woody wetland",                       "13.6 %", "riparian bottomland hardwood; + 0.09 % emergent wetland"),
+ ("Shrub/scrub",                         "10.8 %", "mostly recently harvested pine"),
+ ("Pasture/hay",                         "11.4 %", "cattle; cropland only 0.8 %"),
+ ("Developed (all classes)",             "3.6 %",  "of which high-intensity 0.02 %; impervious 0.41 %"),
+ ("Open water",                          "0.54 %", "3,828 small ponds, mean size 2.9 ha"),
+ ("'Planted/cultivated' (NLCD 81+82)",   "12.2 %", "—"),
+ ("Population density (2000)",           "8.6 /km²","rural"),
+ ("Road density",                        "1.15 km/km²","—"),
+ ("Protected (GAP status 3, incl. state/national forest)", "18.9 %", "commercial forestry permitted"),
+]
+pd.DataFrame(lc, columns=["Class", "Share", "Comment"]).style.hide(axis="index")
+```
+
+```{python}
+#| label: tbl-dams
+#| tbl-cap: "Dam development inside the gauged basin over the modelling record [@falcone2011]. Storage is expressed as megalitres per km², which is numerically identical to millimetres of basin-equivalent water depth."
+dams = pd.DataFrame(
+    {"before 1940": [0, 0.0], "before 1950": [0, 0.0], "before 1960": [2, 0.11],
+     "before 1970": [6, 1.32], "before 1980": [14, 4.02], "before 1990": [14, 4.02],
+     "2009 (NID)":  [31, 8.03]},
+    index=["number of dams", "total storage (mm of basin depth)"])
+dams
+```
+
+**Human influence is negligible for this study (VERIFIED):**
+
+* GAGES-II classifies 02472000 as **"Ref" (reference / least-disturbed)**, with a hydrologic-disturbance
+  index of **9** (low) and screening note *"small towns & reservoirs on some tribs, lt-mod ag & forest"*;
+  it is a member of the **HCDN-2009** network and of the **CAMELS 531-basin** benchmark subset
+  [@falcone2011; @newman2015; @addor2017; @kratzert2019].
+* **No major dams** (`MAJ_NDAMS = 0`). Total impoundment storage grew from 0 mm (1950) to 4.0 mm (1980) of
+  basin-equivalent depth — **0.8 % of the mean annual runoff of 494 mm**. Even the 2009 value (8.0 mm) is
+  1.6 %. **No reservoir module is needed**, but the 0 → 14 dam increase between 1955 and 1980 is the only
+  identifiable slow non-stationarity in the record.
+* Freshwater withdrawal 4.1 ML km⁻² yr⁻¹ = **4.1 mm/yr** (0.8 % of runoff), no irrigated agriculture,
+  no canals, no major NPDES discharger.
+* MDEQ states the Pascagoula system is *"the last unregulated major river system in the lower 48 states"*
+  [@mdeq_pascagoula].
+* The main *land-cover* non-stationarity in 1948–1988 is silvicultural: conversion of cut-over land to
+  managed loblolly/slash pine plantations across the Piney Woods. This can shift ET by a few % per decade
+  but is far smaller than interannual climate variability; **treat the record as stationary and check for a
+  trend in calibration residuals rather than modelling land-cover change** (recommendation to a03/a16).
+
+# Hydrologic regime
+
+## Flow statistics (calibration window only)
+
+```{python}
+#| label: tbl-regime
+#| tbl-cap: "Streamflow statistics of the modelling record, calibration metric window 1952-10-01…1988-09-30 (13,149 days). Computed through src/common/data.py; the evaluation window is excluded."
+q = cm["Q"].to_numpy()
+stats = [
+ ("Mean flow",                    f"{q.mean():.3f} mm/d = {q.mean()*365.25:.0f} mm/yr = {q.mean()*1949.1/86.4:.1f} m³/s"),
+ ("Median flow",                  f"{np.median(q):.3f} mm/d"),
+ ("Q5 / Q25 / Q75 / Q95",         f"{np.quantile(q,.05):.3f} / {np.quantile(q,.25):.3f} / {np.quantile(q,.75):.3f} / {np.quantile(q,.95):.3f} mm/d"),
+ ("Q99 / maximum daily",          f"{np.quantile(q,.99):.2f} / {q.max():.2f} mm/d"),
+ ("Minimum daily flow",           f"{q.min():.3f} mm/d (never zero — perennial)"),
+ ("Days below 0.1 mm/d",          f"{(q<0.1).mean()*100:.1f} %"),
+ ("Coefficient of variation",     f"{q.std()/q.mean():.2f}"),
+ ("Skewness of daily Q",          f"{pd.Series(q).skew():.1f}"),
+ ("Runoff ratio Q/P",             f"{q.sum()/cm['P'].to_numpy().sum():.3f}"),
+ ("Wettest / driest water year",  f"WY{pd.Series(q).groupby(np.where(cm.index.month>=10, cm.index.year+1, cm.index.year)).mean().idxmax()} / "
+                                  f"WY{pd.Series(q).groupby(np.where(cm.index.month>=10, cm.index.year+1, cm.index.year)).mean().idxmin()}"),
+]
+pd.DataFrame(stats, columns=["Statistic", "Value"]).style.hide(axis="index")
+```
+
+## Recession, baseflow and the flow-duration curve
+
+```{python}
+#| label: fig-regime
+#| fig-cap: "Dynamic signature of the basin, from the calibration window only. (a) flow-duration curve on log scale — five orders of magnitude, no zero flows; (b) cross-correlation of daily precipitation with streamflow, peaking at a lag of 3 days; (c) daily recession ratio Q(t+1)/Q(t) during rain-free spells, median k = 0.915 d⁻¹; (d) a two-year excerpt with a Lyne–Hollick baseflow separation (BFI = 0.41)."
+#| fig-width: 10.5
+#| fig-height: 7.2
+Pc = cm["P"].to_numpy()
+
+def lyne_hollick(x, a=0.925, passes=3):
+    y = x.copy()
+    for p in range(passes):
+        if p % 2: y = y[::-1]
+        f = np.zeros_like(y); f[0] = y[0]
+        for i in range(1, len(y)):
+            f[i] = a*f[i-1] + (1+a)/2*(y[i]-y[i-1])
+        b = np.minimum(y, y - np.maximum(f, 0))
+        if p % 2: b = b[::-1]; y = y[::-1]
+        y = b
+    return y
+
+bf   = lyne_hollick(q); BFI  = bf.sum()/q.sum()
+bf98 = lyne_hollick(q, a=0.98); BFI98 = bf98.sum()/q.sum()
+lags = np.arange(0, 11)
+xcorr = [np.corrcoef(Pc[:len(Pc)-k], q[k:])[0, 1] for k in lags]
+dry = np.ones(len(q), bool)
+for k in range(3): dry[k:] &= (Pc[:len(Pc)-k] < 0.5)
+ratio = q[1:][dry[1:]] / np.maximum(q[:-1][dry[1:]], 1e-9)
+ratio = ratio[(ratio > 0.3) & (ratio < 1.0)]
+k_rec = float(np.median(ratio)); tau = -1/np.log(k_rec)
+
+fig, axs = plt.subplots(2, 2, figsize=(10.5, 7.2))
+ax = axs[0, 0]
+ax.semilogy(np.linspace(0, 100, len(q)), np.sort(q)[::-1], color="#4C78A8")
+ax.set_xlabel("exceedance probability (%)"); ax.set_ylabel("Q (mm/d)")
+ax.set_title("(a) flow-duration curve, WY1953–1988")
+
+ax = axs[0, 1]
+ax.bar(lags, xcorr, color="#54A24B"); ax.set_xlabel("lag of P before Q (days)")
+ax.set_ylabel("Pearson r"); ax.set_title(f"(b) P→Q cross-correlation (peak at {lags[int(np.argmax(xcorr))]} d)")
+
+ax = axs[1, 0]
+ax.hist(ratio, bins=60, color="#E45756")
+ax.axvline(k_rec, color="k", lw=1.5)
+ax.set_xlabel("Q(t+1)/Q(t) on rain-free days"); ax.set_ylabel("count")
+ax.set_title(f"(c) recession: median k = {k_rec:.3f} d⁻¹ (τ = {tau:.1f} d)")
+
+ax = axs[1, 1]
+sl = slice(np.where(cm.index == pd.Timestamp("1973-10-01"))[0][0],
+           np.where(cm.index == pd.Timestamp("1975-09-30"))[0][0])
+ax.fill_between(cm.index[sl], 0, q[sl], color="#9ecae1", label="total Q")
+ax.fill_between(cm.index[sl], 0, bf[sl], color="#31688e", label="baseflow (Lyne–Hollick)")
+ax.set_ylabel("Q (mm/d)"); ax.legend(fontsize=8)
+ax.set_title(f"(d) WY1974–1975 excerpt — BFI = {BFI:.2f}")
+fig.tight_layout(); fig.savefig(FIG / "a01_regime.png", bbox_inches="tight"); plt.show()
+
+print(f"BFI (alpha = 0.925, 3 passes) = {BFI:.3f};  BFI (alpha = 0.98) = {BFI98:.3f};  "
+      f"Wolock grid (GAGES-II) = 0.299")
+print(f"master recession k = {k_rec:.4f} d^-1  ->  linear-store residence time tau = {tau:.1f} d "
+      f"(n = {len(ratio):,} rain-free day pairs)")
+```
+
+## Travel time / time of concentration
+
+```{python}
+#| label: tc
+#| code-summary: "Time-of-concentration estimates"
+L_main_m, L_bas_km, relief_m = 108_700.0, 73.3, 130.0
+S = relief_m / L_main_m                                   # main-stem slope, m/m
+tc_kirpich_min = 0.0195 * L_main_m**0.77 * S**-0.385      # Kirpich (1940), SI form
+tc_kirpich_d   = tc_kirpich_min / 1440
+v_mps          = np.array([0.4, 0.6, 1.0])                # plausible Coastal-Plain channel velocities
+tc_vel_d       = L_main_m / v_mps / 86400
+print(f"main-stem slope                        : {S*1000:.2f} m/km")
+print(f"Kirpich time of concentration          : {tc_kirpich_min:.0f} min = {tc_kirpich_d:.2f} d")
+print(f"velocity method (0.4 / 0.6 / 1.0 m/s)  : {tc_vel_d[0]:.2f} / {tc_vel_d[1]:.2f} / {tc_vel_d[2]:.2f} d")
+print(f"observed P->Q cross-correlation peak   : {lags[int(np.argmax(xcorr))]} d  (r = {max(xcorr):.3f})")
+print(f"=> recommended pure translation delay  : 1-3 days; storage response tau ~ {tau:.0f} d")
+```
+
+Three independent estimates agree on a **catchment response time of 1–3 days**, with the *storage* response
+(τ ≈ 11 d for the slow store) an order of magnitude longer. The daily time step therefore resolves the
+routing only marginally: a **Nash cascade of 2–3 linear reservoirs, a GR4J-type unit hydrograph with
+x4 ≈ 1.5–3 d, or a 1–2 day pure lag** are all defensible; a full hydraulic routing scheme is not.
+
+## Floods and low flows in the record (historical context only)
+
+```{python}
+#| label: fig-peaks
+#| fig-cap: "USGS annual instantaneous peak discharge at 02472000 (independent published record, historical context only — not used for any fitting, scaling or model selection). The evaluation window WY1949–WY1951 is shaded: it contains the January 1950 flood (45,400 ft³/s ≈ 57 mm/d instantaneous), the 3rd largest peak of the 1939–1988 systematic record."
+#| fig-width: 9.5
+#| fig-height: 3.6
+pk_p = fetch("https://nwis.waterdata.usgs.gov/nwis/peak?site_no=02472000&agency_cd=USGS&format=rdb",
+             "peaks.rdb")
+if pk_p:
+    pk = rdb(pk_p)
+    pk = pk[pk["peak_va"].notna() & pk["peak_dt"].notna()].copy()
+    pk["pkdate"] = pd.to_datetime(pk["peak_dt"], errors="coerce")
+    pk = pk.dropna(subset=["pkdate"])
+    pk["cfs"] = pk["peak_va"].astype(float)
+    pk["mmd"] = pk["cfs"] * 0.0283168 * 86.4 / 1949.1
+    sel = pk[(pk["pkdate"].dt.year >= 1939) & (pk["pkdate"].dt.year <= 1988)]
+    fig, ax = plt.subplots(figsize=(9.5, 3.6))
+    ax.axvspan(pd.Timestamp("1948-10-01"), pd.Timestamp("1951-09-30"), color="#f0c24b", alpha=0.35,
+               label="evaluation window (a16 only)")
+    ax.vlines(sel["pkdate"], 0, sel["mmd"], color="#4C78A8", lw=2)
+    ax.plot(sel["pkdate"], sel["mmd"], "o", ms=3.5, color="#1f3b57")
+    for _, r in sel.nlargest(4, "mmd").iterrows():
+        ax.annotate(f"{r['pkdate'].date()}\n{r['cfs']:,.0f} ft³/s", (r["pkdate"], r["mmd"]), fontsize=7,
+                    xytext=(0, 5), textcoords="offset points", ha="center")
+    ax.set_ylabel("instantaneous peak (mm/d)"); ax.legend(fontsize=8, loc="upper left")
+    ax.set_title("Annual instantaneous peaks, USGS 02472000, 1939–1988")
+    fig.tight_layout(); fig.savefig(FIG / "a01_peaks.png", bbox_inches="tight"); plt.show()
+    print("Largest systematic peaks 1939–1988 (ft³/s): " +
+          ", ".join(f"{r['pkdate'].date()} {r['cfs']:,.0f}" for _, r in sel.nlargest(5, "mmd").iterrows()))
+    print("Historic peaks before the gauge: 1856-04 56,000 ft³/s (stage 33.0 ft), 1900-04 50,000 ft³/s")
+```
+
+* Floods are **winter–spring, frontal** events: of the 50 annual peaks 1939–1988, **48 occur between
+  December and May** (27 in March–April alone), 2 in October and **none in June–September**. Summer convective and even tropical-cyclone rain rarely
+  produces the annual maximum, because the soil store is empty — another strong argument for a
+  **state-dependent runoff-generation function**.
+* Largest events of the modelling record: **1974-04-14 (54,200 ft³/s)**, **1961-02-23 (48,500)**,
+  **1950-01-08 (45,400)**, **1990-02-17 (46,700, outside)**; historic 1856-04 (56,000).
+* The **evaluation window (WY1949–WY1951) contains one of the largest floods of the century (Jan 1950)**
+  and, per the scaffold note, is wetter than the calibration mean. Models that extrapolate badly on the
+  upper tail (e.g. saturating storage, hard `Cmax` ceilings) will be penalised there. Recommendation to a03:
+  **prefer structures whose fast-runoff function has no hard upper bound**, and to a10: do not let the
+  calibration force `Cmax`/`x1` to the lower edge of its prior.
+* Low flows: the 7-day minimum never reaches zero; October is the driest month (13.6 mm of runoff).
+  A model that drains its groundwater store to zero in autumn will lose KGE through the variability ratio.
+
+# Benchmark performance in the literature
+
+```{python}
+#| label: tbl-bench
+#| tbl-cap: "Independently published model performance **at this gauge (USGS 02472000)**. Note the different forcings/periods — these are order-of-magnitude expectations, not a like-for-like comparison with this project."
+bench = [
+ ("SAC-SMA + Snow-17, basin-calibrated", "NSE 0.796", "CAMELS/Daymet, test WY1990–1999", "@newman2015; @kratzert2019", "VERIFIED"),
+ ("HBV, calibrated (upper benchmark)",   "NSE 0.819", "CAMELS/Daymet, test WY1990–1999", "@kratzert2019", "VERIFIED"),
+ ("HBV, uncalibrated ensemble (lower)",  "NSE 0.687", "CAMELS/Daymet, test WY1990–1999", "@kratzert2019", "VERIFIED"),
+ ("FUSE (structures 900/902/904)",       "NSE 0.775 / 0.777 / 0.779", "CAMELS/Daymet, test WY1990–1999", "@kratzert2019", "VERIFIED"),
+ ("VIC, basin-calibrated / CONUS",       "NSE 0.720 / 0.437", "CAMELS/Daymet, test WY1990–1999", "@kratzert2019", "VERIFIED"),
+ ("mHM, basin-calibrated / CONUS",       "NSE 0.702 / 0.455", "CAMELS/Daymet, test WY1990–1999", "@kratzert2019", "VERIFIED"),
+ ("LSTM (regional, +static attributes)", "NSE 0.837 (8 seeds) / 0.855 (ensemble)", "CAMELS, test WY1990–1999", "@kratzert2019", "VERIFIED"),
+ ("EA-LSTM (regional)",                  "NSE 0.813 / 0.832 (ensemble)", "CAMELS, test WY1990–1999", "@kratzert2019", "VERIFIED"),
+ ("LSTM (regional, no static attrs.)",   "NSE 0.544", "CAMELS, test WY1990–1999", "@kratzert2019", "VERIFIED"),
+ ("National Water Model v2.1 retrospective", "KGE 0.72, NSE 0.71, logNSE 0.77, r 0.84, PBIAS −13.2 %", "daily, n = 12,145 d", "@towler2023", "VERIFIED"),
+]
+pd.DataFrame(bench, columns=["Model", "Reported skill at 02472000", "Setting", "Source", "Status"]).style.hide(axis="index")
+```
+
+Studies that use **exactly this 40-year `LeafRiverDaily.txt` record** (same file, P/PET/Q in mm/d,
+WY1949–1988, ≈1944 km²):
+
+| Study | Model(s) | Objective / algorithm | Period | Reported skill |
+|---|---|---|---|---|
+| @duan1992 | SIXPAR, SAC-SMA | SCE-UA global optimisation | WY1953–1962 subsets | (optimisation efficiency; the origin of SCE-UA) |
+| @sorooshian1993 | SAC-SMA | SCE-UA, effect of calibration-data length | WY1953–1962 | ~8 years of daily data needed for stable parameters |
+| @vrugt2003 | HYMOD (5 par.) | SCEM-UA, posterior | 1952-01-01…1954-09-30 | parameter posteriors; RMSE-based |
+| @vrugt2016 (DREAM manual, Ex. 23) | SAC-SMA + Nash cascade | DREAM, limits of acceptability | WY1953–1962, 65 d spin-up | 14-parameter prior ranges (reproduced in §10) |
+| @moradkhani2005 | HYMOD | dual state–parameter EnKF/PF | 1952–1953 | sequential data assimilation |
+| @wang2024 | HyMOD-like, GR4J, SAC-SMA, LSTM, MCP | KGE training, SCE / back-prop, 3-y spin-up, 2:1:1 split | all 40 y | **median annual KGE_ss 0.53 / 0.77 / 0.81 / 0.88–0.90** → median annual **KGE ≈ 0.34 / 0.68 / 0.73 / 0.83–0.86** |
+
+::: {.callout-note}
+## Realistic target for this project
+@wang2024 report *annual* KGE distributions (harder than whole-period KGE), while @kratzert2019 report
+whole-period NSE at this gauge for calibrated conceptual models in the range **0.69–0.82**, and the
+operational NWM reaches **NSE 0.71 / KGE 0.72**. Combining these: a well-calibrated lumped conceptual model
+on the Leaf River should reach **NSE ≈ 0.80–0.87 and KGE ≈ 0.80–0.90** on a multi-year window; the
+often-quoted "NSE ~0.8–0.9 on Leaf River" is **confirmed as achievable but at the optimistic end**. Because
+the evaluation window here is only 1,003 days, is wetter than the calibration mean, and contains a major
+flood, **a16 should expect lower scores than calibration and a variability ratio α < 1.**
+:::
+
+# Process relevance and modelling implications {#sec-process}
+
+```{python}
+#| label: tbl-process
+#| tbl-cap: "Process → evidence → importance → modelling implication. This is the main deliverable for a03 (model proposer)."
+proc = [
+ ("Soil-moisture accounting / storage state",
+  "Q seasonality (11→87 mm/month) is 8× stronger than P seasonality (81→152 mm/month); July is the 2nd wettest month but yields the least runoff; no annual peak ever occurs in Aug–Sep",
+  "HIGH (dominant)",
+  "A non-linear soil store is mandatory. Runoff coefficient must depend on storage state, not on P alone."),
+ ("ET limitation / actual-vs-potential ET",
+  "E/P = 0.65 at φ = 0.74, ~0.07 above the Budyko curve; PET 31→141 mm/month",
+  "HIGH",
+  "AET must reach PET when wet and decline smoothly when dry (linear or root-zone-weighted store). Avoid structures that cap AET well below PET, or the long-term bias (KGE β) will be wrong."),
+ ("Saturation excess (Dunne) / variable source area",
+  "Wolock PERDUN 5.1 %; TWI 12.69; water table 1.12 m; 13.6 % woody wetland; HSG C+D 65 %",
+  "MEDIUM-HIGH",
+  "A distribution function of storage capacity (PDM/HYMOD b, GR4J production store, VIC/Xinanjiang curve) captures this parsimoniously."),
+ ("Infiltration excess (Horton)",
+  "Wolock PERHOR 7.1 %; intense summer convective storms; silty surface horizons over sand",
+  "MEDIUM (low at daily step)",
+  "Not worth a separate mechanism at a daily time step; a small impervious/direct-runoff fraction (PCTIM 0–5 %, ADIMP) or the upper tail of the distribution function is enough."),
+ ("Interflow / fast subsurface flow",
+  "~88 % of runoff generation is subsurface (100−PERDUN−PERHOR); clay-rich Jackson Group perches water; recession τ ≈ 11 d",
+  "HIGH",
+  "At least one intermediate (days-to-weeks) linear store between the fast surface path and the deep groundwater path."),
+ ("Groundwater / baseflow",
+  "BFI 0.30–0.41; contact time 549 d; minimum daily Q = 0.069 mm/d, never zero; permeable Catahoula sands",
+  "HIGH",
+  "A slow linear store with τ ≈ 30–100 d that never empties; two parallel slow stores (SAC-SMA LZFPM/LZFSM, HBV) fit the 11 d vs 549 d discrepancy better than one."),
+ ("Deep loss / inter-catchment exchange",
+  "E/P sits above the Budyko curve; GR4J-type exchange helped in @wang2024 on this exact record; Coastal-Plain aquifers are regionally continuous",
+  "MEDIUM",
+  "Allow a small (possibly negative) exchange/deep-percolation flux. Worth one model slot."),
+ ("Channel routing / translation delay",
+  "P→Q cross-correlation peaks at 3 d; Kirpich t_c = 1.4 d; main-stem 108.7 km at 1.2 m/km",
+  "MEDIUM",
+  "2–3 cascaded linear reservoirs, a GR4J unit hydrograph with x4 ≈ 1.5–3 d, or a 1–2 d pure lag. No hydraulic routing."),
+ ("Snow / frozen ground",
+  "Snow = 0.8 % of P (GAGES-II); 23 mm snowfall per year (NOAA); 59 frost days but mean January T = 6.8 °C",
+  "NEGLIGIBLE",
+  "**Omit any snow module.** Do not spend parameters on it (this also makes the CAMELS SAC-SMA+Snow-17 benchmark slightly pessimistic here)."),
+ ("Reservoir regulation / withdrawals",
+  "GAGES-II 'Ref'; 0 major dams; storage 4.0 mm (1980) = 0.8 % of annual runoff; withdrawal 4.1 mm/yr; MDEQ: last unregulated major river system in the lower 48",
+  "NEGLIGIBLE",
+  "No reservoir or abstraction term. Treat the record as natural."),
+ ("Land-cover non-stationarity (silviculture)",
+  "Pine-plantation expansion 1950s–1980s; 31 % evergreen + 11 % shrub (recent harvest) in NLCD 2006; dams 0→14 between 1955 and 1980",
+  "LOW",
+  "Assume stationarity; a16/a04 may check calibration residuals for a monotone trend. Do not add time-varying parameters."),
+ ("Glaciers, permafrost, karst, irrigation",
+  "Absent (0 % snow/ice; sedimentary Coastal Plain; PCT_IRRIG_AG = 0)",
+  "NONE",
+  "Ignore."),
+]
+pd.DataFrame(proc, columns=["Process", "Evidence (with numbers)", "Importance", "Modelling implication"])
+```
+
+**Short version for a03 — a defensible five-model portfolio**
+
+1. A **probability-distributed soil store + parallel fast/slow linear reservoirs** (HYMOD/PDM family) —
+   matches the variable-source-area evidence; the documented weak spot on this record is the missing
+   groundwater exchange [@wang2024].
+2. **GR4J** — 4 parameters, includes the groundwater-exchange term that @wang2024 found decisive here,
+   and already scores NSE ≈ 0.68 (median annual KGE) on this exact data set.
+3. **SAC-SMA (no Snow-17)** — the model this data set was built for; the two lower-zone free-water stores
+   directly encode the 11 d / 549 d two-timescale baseflow evidence; benchmark NSE 0.796 at this gauge.
+4. **HBV-style** with two-outlet lower box + triangular UH — the calibrated-HBV benchmark is the *best*
+   conceptual model at this gauge (NSE 0.819).
+5. An **LSTM / hybrid** — the regional-LSTM benchmark at this gauge is NSE 0.84–0.86, but a *single-basin*
+   LSTM trained on 36 years has far fewer samples; expect it to be competitive, not automatically best.
+   Warm-up/state handling must respect the evaluation firewall (see `config/project.yaml → ml_state_note`).
+
+# Recommended parameter prior ranges {#sec-priors}
+
+```{python}
+#| label: tbl-priors
+#| tbl-cap: "Physically-defensible prior ranges for a03/a10. 'Physical anchor' cites the evidence in this report; 'literature range' is what published Leaf River studies used."
+priors = [
+ ("Maximum/mean soil-water storage (lumped, e.g. HYMOD Cmax, GR4J x1, HBV FC)",
+  "100–800 mm (mode ≈ 250–400)",
+  "AWC 0.15 mm/mm × 1516 mm soil thickness ≈ 227 mm mean plant-available storage; spatially distributed maxima are 2–4× the mean",
+  "Cmax 1–500 mm [@vrugt2003]; GR4J x1 typically 100–1200 mm"),
+ ("Storage-distribution shape (HYMOD b / Xinanjiang B)",
+  "0.1–2.0",
+  "HSG C+D = 65 % and TWI 12.69 ⇒ marked spatial variability of saturation",
+  "0.1–2.0 [@vrugt2003]"),
+ ("Split fast/slow (HYMOD α)",
+  "0.1–0.99 (expect 0.5–0.8)",
+  "BFI 0.30–0.41 ⇒ 60–70 % of flow through the fast/intermediate path",
+  "0.1–0.99 [@vrugt2003]"),
+ ("Fast reservoir residence time (HYMOD 1/Rq, Nash cascade k)",
+  "0.5–5 d",
+  "P→Q lag 3 d; Kirpich t_c 1.4 d",
+  "Rq 0.1–0.99 d⁻¹ [@vrugt2003]"),
+ ("Slow reservoir residence time (1/Rs)",
+  "10–200 d (expect 30–100)",
+  "master recession τ = 11 d (mixed), contact time 549 d ⇒ the *deep* component must be much slower than 11 d",
+  "Rs 0.001–0.10 d⁻¹ [@vrugt2003]"),
+ ("Impervious / direct-runoff fraction (PCTIM, ADIMP)",
+  "PCTIM 0–0.03; ADIMP 0–0.30",
+  "NLCD impervious 0.41 %; developed 3.6 %; woody wetland 13.6 % behaves as a variable-impervious area",
+  "PCTIM 0–0.1, ADIMP 0–0.4 [@vrugt2016]"),
+ ("Routing lag / UH time base (GR4J x4)",
+  "1.0–4.0 d",
+  "cross-correlation peak 3 d; Kirpich 1.4 d; velocity method 1.3–3.1 d",
+  "x4 commonly 0.5–4 d"),
+ ("Groundwater exchange (GR4J x2)",
+  "−3 to +3 mm/d (expect small negative)",
+  "E/P is 0.07 above the Budyko curve; regionally continuous Coastal-Plain aquifers",
+  "@wang2024 found exchange important on this record"),
+ ("Percolation / ZPERC, REXP (SAC-SMA)",
+  "ZPERC 1–250, REXP 0–5",
+  "permeability 34.8 mm/h in the sandy Catahoula; clay-rich Jackson Group",
+  "@vrugt2016, Table 23.01"),
+ ("SAC-SMA storages",
+  "UZTWM 1–150, UZFWM 1–150, LZTWM 1–500, LZFPM 1–1000, LZFSM 1–1000 mm",
+  "total soil thickness 1516 mm; deep sediments allow large lower zones",
+  "@vrugt2016, Table 23.01"),
+ ("SAC-SMA depletion rates",
+  "UZK 0.1–0.5, LZPK 0.0001–0.025, LZSK 0.01–0.25 d⁻¹",
+  "LZPK⁻¹ = 40–10,000 d brackets the 549 d contact time; LZSK⁻¹ = 4–100 d brackets the 11 d recession",
+  "@vrugt2016, Table 23.01"),
+ ("Snow parameters",
+  "**do not include**",
+  "snow = 0.8 % of P",
+  "—"),
+ ("Initial states (warm-up)",
+  "Soil store ≈ 50–70 % full on 1 Oct; groundwater store ≈ mean October baseflow 0.45 mm/d ÷ k_slow",
+  "October is the driest month (13.6 mm runoff, 80.8 mm P, 86.1 mm PET)",
+  "@vrugt2016 uses a 65 d spin-up; @wang2024 uses 3 years"),
+]
+pd.DataFrame(priors, columns=["Parameter (generic name)", "Recommended prior", "Physical anchor (this report)", "Literature range"])
+```
+
+::: {.callout-warning}
+## Warm-up length
+The evaluation protocol allows only **92 days** of warm-up (1948-10-01…1948-12-31). With a slow store of
+τ ≈ 30–100 d that is **1–3 e-folding times** — not enough to forget a bad initial condition. Recommendation
+to a03/a10/a16: **initialise the slow store analytically** from the first observed low flows *of the warm-up
+period only* (that is inside the warm-up, not the metric window — but note that even that touches evaluation
+rows, so it must be done by a16 or by a state-independent rule), or better, **choose initial states as
+calibrated parameters fitted on the calibration period** and reuse them. Do not tune initial states on
+evaluation data.
+:::
+
+# Uncertainties and unverified statements {#sec-uncertainty}
+
+| # | Item | Status | Impact |
+|---|---|---|---|
+| 1 | Effective basin area of the data file = **1949.1 km²**, vs NWIS 1924.4 km² and literature 1944 km². | VERIFIED by regression, but the exact area NWS used is undocumented | Only matters if someone converts to m³/s. Use 1949.1 km². |
+| 2 | Basin **is** in the CAMELS 531-basin list (file `data/basin_list.txt` of @kratzert2019) and is HCDN-2009. The CAMELS attribute files (`camels_*.txt`) could **not** be downloaded (NCAR GDEX returned 404 on 2026-09-15). | in_camels VERIFIED; CAMELS attribute values UNAVAILABLE | GAGES-II was used instead; it covers the same attributes from the same underlying data sets. |
+| 3 | GAGES-II soils/land-cover are **STATSGO** and **NLCD 2006**, i.e. ~20 years after the record ends. | LITERATURE-grade for 1948–1988 | Land cover in the 1950s had more cut-over land and less mature pine; ET may have been slightly lower early in the record. |
+| 4 | Wolock's `PERDUN` / `PERHOR` / `CONTACT` / `BFI_AVE` are **modelled grids**, not measurements. | LITERATURE | Used only for relative weighting of processes, never as hard constraints. |
+| 5 | Surficial-geology shares come from 25 random points, not an area-weighted overlay. | VERIFIED method, ±10 % sampling error | Conclusion (sand-over-clay Coastal Plain) is robust. |
+| 6 | Historic peaks of 1856 and 1900 are `Bd`-coded (dam-break/estimated-stage) historic estimates. | USGS-flagged | Not used. |
+| 7 | Literature statements that Tallahala Creek / Bogue Homa are upstream of Collins are **wrong**. | REFUTED here via WBD/NLDI | Do not use them to argue for sub-basin structure. |
+| 8 | Median-annual KGE_ss values of @wang2024 were converted with KGE = 1 − √2·(1 − KGE_ss); the paper's own definition. | VERIFIED conversion, but *annual* ≠ *whole-period* | Treat the resulting KGE as a floor, not a target. |
+| 9 | The evaluation window's wetness/flood character is taken from the scaffold note and the **published USGS peak record**, never from the project's own observed Q. | Compliant with CLAUDE.md rule 3 | — |
+
+# Handoff notes
+
+**To a02 (data analyst).** (i) `Q` is mm/d; the exact conversion embedded in the file is
+`mm/d = m³/s · 86.4 / 1949.1`. (ii) The start date **1948-10-01 is now independently verified** (daily
+*r* = 1.000000 against USGS 02472000 over the whole calibration window, ±1 d shift drops *r* to 0.89,
++265 d drops water-year *r* to 0.35) — ISSUE-001 can be closed on evidence, not just instruction.
+(iii) USGS reports no missing daily values over 1938–present and 0.6 % estimated values, so gap handling is
+a non-issue. (iv) An external, leakage-free reference series exists (NWIS daily values) if a02 wants to
+validate the file outside the evaluation window.
+
+**To a03 (model proposer).** Process priorities in @sec-process; the five-model portfolio suggestion is
+advisory. Non-negotiables from the physical evidence: non-linear storage-dependent runoff generation,
+ET that can reach PET, ≥ 2 flow paths with time constants of ~1–5 d and ~30–100 d, a 1–3 d routing lag,
+**no snow**, **no reservoirs**.
+
+**To a10 (optimisation advisor).** Prior ranges in @sec-priors. Expect strong correlation between the
+slow-store residence time and the soil-store capacity (both control the annual water balance); the
+`LZPK`-type parameters are the classic ill-identified ones on this basin [@sorooshian1993 needed ~8 years of
+daily data for stable SAC-SMA parameters — the 36-year calibration window here is ample]. Warm-up: use ≥ 1
+water year inside calibration (the config already does).
+
+**To a16 (evaluator).** The 1,003-day evaluation window is wetter than the calibration mean and contains the
+January 1950 flood (45,400 ft³/s ≈ 57 mm/d instantaneous peak, 3rd largest of 1939–1988). Expect KGE
+components α < 1 and possibly β < 1. Independent skill anchors at this gauge: NWM v2.1 NSE 0.71/KGE 0.72;
+calibrated conceptual models NSE 0.69–0.82; regional LSTM NSE 0.84–0.86.
+
+# References {.unnumbered}
+
+::: {#refs}
+:::

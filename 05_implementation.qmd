@@ -1,0 +1,248 @@
+---
+title: "Implementation and Calibration"
+subtitle: "Phases P4 and P5 — how the five models were built, tested and fitted"
+---
+
+```{python}
+#| label: setup
+#| echo: false
+import json, os, sys
+from pathlib import Path
+import pandas as pd
+ROOT = Path.cwd()
+while not (ROOT / "config" / "project.yaml").exists():
+    ROOT = ROOT.parent
+sys.path.insert(0, str(ROOT)); os.chdir(ROOT)
+def handoff(a):
+    p = ROOT / "context" / "handoffs" / f"{a}.json"
+    return json.loads(p.read_text()) if p.exists() else {}
+def kn(a, *keys, default=None):
+    d = handoff(a).get("key_numbers", {})
+    for k in keys:
+        if k in d: return d[k]
+    return default
+```
+
+# Purpose
+
+The other reports cover design (what to model, how to score it, how to search) and the final result. This
+one covers the middle: five agents turning specifications into tested code, and the calibration that
+followed. It exists because that step is where a study of this kind usually breaks — silently, through a
+leak or an unverified assumption — and because the record of *how* the numbers were produced is part of the
+result.
+
+# Phase P4 — building the models
+
+Five agents (a05–a09) worked in parallel, each implementing one slot from `config/models.yaml` and the
+corresponding *Mathematical formulation* section of the [model report](03_models.qmd). They did not
+coordinate. Each subclassed the same `BaseModel` contract.
+
+```{python}
+#| label: tbl-build
+#| tbl-cap: "The five implementations. Default-parameter scores are on the calibration metric window 1952-10-01..1988-09-30 (13,149 d); slot 5's is a 30-of-200-epoch smoke run, so it is a lower bound."
+rows = []
+spec = [("a05", 1, "arx_api_ridge", "statistical", "trainable"),
+        ("a06", 2, "gr4j",          "conceptual",  "conceptual"),
+        ("a07", 3, "hbv_light",     "conceptual",  "conceptual"),
+        ("a08", 4, "sacsma",        "conceptual",  "conceptual"),
+        ("a09", 5, "lstm_seq2seq",  "data-driven", "trainable")]
+for a, slot, mid, fam, kind in spec:
+    rows.append({"slot": slot, "model": mid, "family": fam, "kind": kind,
+                 "default obj": kn(a, "smoke_objective_cal_default"),
+                 "default KGE": kn(a, "smoke_KGE_cal_default"),
+                 "default NSE": kn(a, "smoke_NSE_cal_default")})
+pd.DataFrame(rows).set_index("slot")
+```
+
+Note that the ordering by *default* performance is close to the inverse of model complexity. That is
+expected and not yet interesting: conceptual models with many parameters are meaningless until calibrated,
+whereas the regression fits its coefficients in closed form and so arrives partly "pre-calibrated".
+
+## Three rules every builder had to follow
+
+These came from a03 and exist to keep the five models comparable and the held-out window clean.
+
+1. **Initial states must be parameter-derived, never observation-derived.** The evaluation window offers
+   only 92 warm-up days, so a model that needs observed flow to initialise cannot be evaluated fairly.
+2. **Integer and ordering constraints are enforced *inside* the model**, so every optimizer sees a plain
+   rectangular box. HBV's `K0 ≥ K1 ≥ K2` and SAC-SMA's integer `NINC` are handled internally.
+3. **Scaling constants are frozen at calibration-window values**, stored in the model artefact and restored
+   by `load()` — never recomputed at prediction time.
+
+Rule 3 is the one that matters most. Recomputing a mean or standard deviation at prediction time would
+quietly leak information from the window being predicted, and would do so without any obvious symptom.
+
+## How the implementations were verified
+
+Because a wrong-but-plausible hydrological model produces perfectly reasonable-looking hydrographs, each
+builder had to prove correctness rather than demonstrate it:
+
+- **Dual implementation.** Every conceptual model has a `numba`-compiled kernel *and* a pure-Python
+  reference path. All three pairs agree **bitwise** (max |difference| exactly 0.0 mm/day).
+- **Mass balance.** Closure was asserted over the full record and across random parameter sets: GR4J
+  4.0 × 10⁻¹¹ mm, HBV 9.9 × 10⁻¹² mm, SAC-SMA 1.4 × 10⁻¹¹ mm over 13,515 days.
+- **Behavioural leak tests.** Rather than inspecting code for leaks, builders poisoned the observed-flow
+  column with nonsense and then deleted it, asserting the simulation was unchanged. Slot 5 went further and
+  made leakage structurally impossible: its scaling object is a frozen dataclass with *no* `fit` method, and
+  a source-scanning test asserts that no function on the prediction path contains a `.mean()` or `.std()`
+  call at all.
+- **Independent agreement.** Slot 2's implementation reproduced a03's separately written prototype to four
+  decimal places — two independent readings of the same specification landing on the same numbers.
+
+## Speed, and why it mattered
+
+```{python}
+#| label: tbl-speed
+#| tbl-cap: "Measured cost per simulation of the 13,515-day calibration run window."
+sp = pd.DataFrame([
+    {"slot": 2, "model": "gr4j",   "ms/run": 0.512, "vs pure Python": "61x"},
+    {"slot": 3, "model": "hbv_light", "ms/run": 0.685, "vs pure Python": "38.7x"},
+    {"slot": 4, "model": "sacsma", "ms/run": 1.763, "vs pure Python": "74x (incl. spin-up)"},
+]).set_index("slot")
+sp
+```
+
+At well under 2 ms per simulation, 100,000 objective evaluations cost roughly a minute of CPU. This is why
+the calibration phase could afford ten independent seeds per model instead of one — a decision that turned
+out to matter (@sec-seeds).
+
+## A specification conflict, and how it was resolved {#sec-spinup}
+
+SAC-SMA's slowest store has a time constant of about 250 days, so its specification asked for **730 warm-up
+days**. Only 366 exist in calibration, and 92 in evaluation. Extending backwards was impossible — earlier
+rows *are* the evaluation period.
+
+The resolution, chosen by the user, was to **cycle the available warm-up window repeatedly until the state
+variables reach a fixed point**, then begin the real run from there. Only precipitation and PET are replayed,
+never observed flow, so the procedure is equally legal on the 92-day evaluation warm-up.
+
+The proof that this removes the problem is not the convergence itself but its *independence from the
+starting point*: seeded from completely empty stores and from completely full stores, the converged state
+agrees to **1.0 × 10⁻⁷ relative**. Convergence takes a median of 8 cycles (maximum 44 across 300 random
+parameter sets, against a cap of 200), and costs 16 % more runtime.
+
+It is worth recording that the spin-up **did not improve the score** (objective 0.5678 with, 0.5680 without,
+at default parameters). It removes an arbitrary dependence on initial conditions, which is a correctness
+result, not a performance one.
+
+# Phase P5 — calibration
+
+Every model was calibrated by maximising a04's objective
+
+$$\mathcal{O} = 0.5\,\mathrm{KGE}(Q_{sim},Q_{obs}) + 0.5\,\mathrm{NSE}(Q_{sim},Q_{obs})$$
+
+on the calibration metric window 1952-10-01…1988-09-30 (13,149 days), using the algorithm a10 prescribed for
+each slot. All four conceptual slots ran ten independent seeds (42–51).
+
+```{python}
+#| label: tbl-calib
+#| tbl-cap: "Calibration outcome per slot. `gap` is the train-minus-validation objective difference: positive means the model does worse out of sample. Read live from results/calibration/."
+rows = []
+for slot, mid, alg in [(1, "arx_api_ridge", "optuna_tpe"), (2, "gr4j", "sceua"),
+                       (3, "hbv_light", "cmaes"), (4, "sacsma", "sceua")]:
+    t = pd.read_csv(ROOT / "results" / "calibration" / mid / "summary_final.csv")
+    b = t.loc[t.objective.idxmax()]
+    rows.append({"slot": slot, "model": mid, "algorithm": alg, "seeds": len(t),
+                 "obj_cal": round(float(b.obj_calibration), 4),
+                 "KGE_cal": round(float(b.KGE_calibration), 4),
+                 "NSE_cal": round(float(b.NSE_calibration), 4),
+                 "obj_val": round(float(b.obj_validation), 4),
+                 "gap": round(float(b.obj_train - b.obj_validation), 4),
+                 "seed sd": round(float(t.objective.std()), 5),
+                 "evals": int(t.n_eval.sum())})
+h = handoff("a15b").get("key_numbers", {})
+rows.append({"slot": 5, "model": "lstm_seq2seq (budgeted)", "algorithm": "optuna_tpe", "seeds": 3,
+             "obj_cal": h.get("objective_calibration"), "KGE_cal": h.get("KGE_calibration"),
+             "NSE_cal": h.get("NSE_calibration"),
+             "obj_val": h.get("seed_ensemble_objective_validation", h.get("objective_validation")),
+             "gap": None, "seed sd": None, "evals": h.get("n_trials_completed")})
+pd.DataFrame(rows).set_index("slot")
+```
+
+## The calibration ranking is not the out-of-sample ranking
+
+On the calibration window the order is the textbook complexity gradient: SAC-SMA > HBV > GR4J > regression.
+On the **internal-validation** window (1981-10-01…1988-09-30, never used for fitting) it changes: the
+regression moves from last to second.
+
+More strikingly, the regression is the **only** model with a *negative* generalisation gap — it scores
+better on data it was not fitted to (−0.0178) while the three conceptual models each lose 0.037–0.042. That
+is the signature of a model that is not exploiting calibration-period idiosyncrasies, and it was the first
+concrete warning that the study's central hypothesis was in trouble (see [the H1-risk section](03_models.qmd#sec-h1-risk) of the model report).
+
+## Seed spread measures how hard each search is {#sec-seeds}
+
+Running ten seeds was not ceremony. The spread across seeds differs by orders of magnitude between models:
+
+- **GR4J (4 parameters):** all ten seeds converged to *identical* parameters, standard deviation 0.00000.
+  SCE-UA finds the global optimum on this surface every time.
+- **SAC-SMA (15 parameters):** standard deviation 0.0161, range 0.8835–0.9258. The surface is genuinely
+  multimodal, and **a single-seed calibration had a real chance of reporting a model 0.04 objective units
+  worse than the one that was found.**
+
+Reassuringly, SAC-SMA's best result (KGE 0.9500 / NSE 0.9017, via SCE-UA) reproduces an independent
+differential-evolution run by its builder (0.9500 / 0.9019) to four decimals — two different algorithms
+arriving at the same optimum.
+
+## Slot 5 was calibrated under a hard budget, and why {#sec-slot5}
+
+The LSTM is the only genuinely compute-constrained slot, and it is where the calibration phase failed first.
+
+`config/optimization.yaml` declared a 90-minute cap on the hyperparameter search
+(`study_timeout_s: 5400`), a 60-epoch limit per trial, and a pruner. **None of it was read by the code** —
+the string `outer` never appears in the runner, and `study.optimize()` was called with no `timeout=`
+argument. The search ran for more than seven hours and produced no artefact at all (`ISSUE-006`).
+
+It was replaced by a **budgeted alternative agent** (`a15b-optimizer-5-fast`) that enforces its deadline in
+its own code: a monotonic clock checked before every trial *and* inside the epoch loop. The same wrapper
+feeds Optuna's pruner, so trials that are going nowhere are stopped early.
+
+```{python}
+#| label: tbl-fast
+#| echo: false
+#| tbl-cap: "The budgeted slot-5 calibration, read from its handoff."
+h = handoff("a15b").get("key_numbers", {})
+pd.DataFrame([
+  {"quantity": "wall time used",        "value": f"{h.get('wall_seconds_total','—')} s of 1500 s cap"},
+  {"quantity": "trials completed",      "value": h.get("n_trials_completed")},
+  {"quantity": "trials pruned",         "value": h.get("n_trials_pruned")},
+  {"quantity": "trials cut by deadline","value": h.get("n_trials_deadline_truncated")},
+  {"quantity": "objective (calibration)","value": h.get("objective_calibration")},
+  {"quantity": "objective (validation)", "value": h.get("seed_ensemble_objective_validation", h.get("objective_validation"))},
+  {"quantity": "device",                "value": h.get("device")},
+]).set_index("quantity")
+```
+
+It finished in **7.6 minutes** — 30 % of its cap — and produced the best calibration-side scores in the
+study. The result is nonetheless reported as a **lower bound**, for a reason its own agent identified: the
+selected hyperparameters are *bound-active* at `hidden_size = 80`, which is the reduced search's own ceiling
+rather than the model's. A fuller search should look above it.
+
+::: {.callout-important}
+## The transferable lesson
+
+A budget that lives only in a configuration file is not a budget. The declared 90-minute cap and the
+enforced 25-minute cap differed by a factor of 3.6 on paper and by a factor of **55 in practice** — seven
+hours against 7.6 minutes — because only one of them was written in code that runs.
+:::
+
+# What carried forward to the evaluation
+
+```{python}
+#| label: tbl-handover
+#| echo: false
+#| tbl-cap: "Calibrated artefacts handed to the evaluator."
+pd.DataFrame([
+  {"slot": 1, "artefact": "results/calibration/arx_api_ridge/best.json", "note": "optuna_tpe, seed 48"},
+  {"slot": 2, "artefact": "results/calibration/gr4j/best.json", "note": "sceua, seed 43 (all seeds identical)"},
+  {"slot": 3, "artefact": "results/calibration/hbv_light/best.json", "note": "cmaes, seed 49"},
+  {"slot": 4, "artefact": "results/calibration/sacsma/best.json", "note": "sceua, seed 42; cyclic spin-up active"},
+  {"slot": 5, "artefact": "results/calibration/lstm_seq2seq_fast/", "note": "3-seed ensemble; frozen scaling restored by load()"},
+]).set_index("slot")
+```
+
+No evaluation-window information entered any of these. The guard in `src/common/data.py` was verified to
+fire, no model or optimizer code hard-codes evaluation dates or row indices, and every agent other than the
+evaluator only ever *removes* the `LR_AGENT` variable.
+
+The held-out result is in the [evaluation report](16_evaluation.qmd).

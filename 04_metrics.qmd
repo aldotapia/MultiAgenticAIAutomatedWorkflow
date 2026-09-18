@@ -1,0 +1,968 @@
+---
+title: "Performance metrics for daily streamflow and the calibration objective for Leaf River"
+subtitle: "Agent 4 (a04-metrics-advisor) — phase P2"
+author: "a04-metrics-advisor"
+date: 2026-09-15
+jupyter: leafriver
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    number-sections: true
+    code-fold: true
+    fig-dpi: 150
+    tbl-cap-location: top
+bibliography: references.bib
+---
+
+```{python}
+#| label: setup
+#| code-fold: true
+import os, sys, json, time, warnings
+from pathlib import Path
+
+ROOT = Path.cwd()
+while not (ROOT / "config" / "project.yaml").exists():
+    ROOT = ROOT.parent
+sys.path.insert(0, str(ROOT)); os.chdir(ROOT)
+
+import numpy as np, pandas as pd
+import matplotlib as mpl, matplotlib.pyplot as plt
+import seaborn as sns
+warnings.filterwarnings("ignore")
+
+from src.common.data import load_data, load_config, slice_run, metric_mask, internal_mask
+from src.common.metrics import kge, nse, kge_components      # CANONICAL - never re-implemented
+import src.common.metrics_extra as mx                        # Agent 4 extension
+
+CFG  = load_config()
+SEED = CFG["reproducibility"]["random_seed"]
+np.random.seed(SEED)
+FIG  = ROOT / "results" / "figures"; FIG.mkdir(parents=True, exist_ok=True)
+sns.set_theme(style="whitegrid", context="notebook")
+mpl.rcParams.update({"figure.dpi": 110, "savefig.dpi": 150, "savefig.bbox": "tight",
+                     "axes.titlesize": 10, "axes.labelsize": 9,
+                     "xtick.labelsize": 8, "ytick.labelsize": 8, "legend.fontsize": 8})
+
+def save(fig, name):
+    p = FIG / f"a04_{name}.png"; fig.savefig(p); return p
+
+def md(obj, **kw):
+    from IPython.display import Markdown
+    return Markdown(obj.to_markdown(**kw))
+
+# ---- data: calibration only. The evaluation window is never touched in this report. ----
+df   = load_data()
+run  = slice_run(df, "calibration")           # 1951-10-01 .. 1988-09-30 (warm-up included)
+MM   = metric_mask(run, "calibration")        # 1952-10-01 .. 1988-09-30, 13 149 d
+TR   = internal_mask(run, "train")            # 1952-10-01 .. 1981-09-30, 10 592 d
+VA   = internal_mask(run, "validation")       # 1981-10-01 .. 1988-09-30,  2 557 d
+P    = np.ascontiguousarray(run["P"].to_numpy())
+PET  = np.ascontiguousarray(run["PET"].to_numpy())
+OBS  = run["Q"].to_numpy()
+IDX  = run.index
+WY   = IDX.year + (IDX.month >= 10).astype(int)
+
+O    = OBS[MM]
+CV_O = O.std() / O.mean()
+print(f"calibration metric window: {IDX[MM][0].date()} .. {IDX[MM][-1].date()}  n = {MM.sum()} d")
+print(f"mean {O.mean():.4f} mm/d | sd {O.std():.4f} mm/d | CV {CV_O:.4f} | "
+      f"skew {float(((O-O.mean())**3).mean()/O.std()**3):.2f} | min {O.min():.4f} | max {O.max():.2f}")
+```
+
+::: {.callout-important}
+## Recommendation in one box
+
+**Calibrate every model slot (a11–a15) by MAXIMISING the equally weighted average of the two
+metrics that will be reported:**
+
+$$
+\mathcal{O} \;=\; 0.5\,\mathrm{KGE}\!\left(Q_{\text{sim}},Q_{\text{obs}}\right)
+            \;+\; 0.5\,\mathrm{NSE}\!\left(Q_{\text{sim}},Q_{\text{obs}}\right)
+$$
+
+on **untransformed** daily flow (mm/day), KGE as defined by @gupta2009 and NSE by @nash1970
+(the project's canonical `src/common/metrics.py`), evaluated on the **calibration metric window
+1952-10-01 … 1988-09-30 (13 149 days)**, warm-up 1951-10-01 … 1952-09-30 excluded.
+Optimisers that minimise use the cost $1-\mathcal{O}$ (perfect = 0, unbounded above).
+Implementation: `src.common.metrics_extra.objective` / `objective_cost`; contract:
+`config/metrics.yaml`.
+
+*No transform and therefore no offset $\varepsilon$ anywhere.* Observed $Q\ge0.069$ mm/day on all
+14 610 days, so $\sqrt{\cdot}$, $\log$ and Box–Cox **would** be defined without an arbitrary
+constant (@sec-why) — the point is that they are not needed: a third $\mathrm{KGE}(\sqrt{Q})$ term
+was tested explicitly and changed every out-of-sample number by less than 0.001.
+
+*Why not plain KGE, the ranking metric?* Because @sec-transfer calibrates two surrogate
+rainfall–runoff models under **24 candidate objectives** on **four independent splits inside the
+calibration period** (three of them 20–46 % wetter than their training years, mimicking the
+evaluation window, which is 29 % wetter than calibration). Result, as mean shortfall behind the
+best objective of each of the 8 experiments ("regret"):
+
+| objective used for calibration | regret in KGE | regret in NSE | worst case KGE | worst case NSE |
+|---|---|---|---|---|
+| **0.5·KGE + 0.5·NSE (recommended)** | 0.026 | 0.017 | **0.056** | **0.047** |
+| KGE alone | **0.020** | 0.047 | 0.039 | 0.162 |
+| NSE alone | 0.052 | **0.003** | 0.107 | 0.010 |
+| KGE(√Q) | 0.024 | 0.019 | 0.067 | 0.063 |
+
+KGE alone and NSE alone each win *their own* metric and lose badly on the other; the 50/50 average
+is the only candidate whose **worst case stays below 0.06 on both metrics simultaneously**. KGE and
+NSE are not redundant on this record — their Spearman rank correlation over behavioural simulations
+is ≈0.7 (@fig-objcorr) — so the average is a genuine compromise rather than a re-weighting.
+
+Trainable models (a09, LSTM) minimise the identical quantity as a **full-batch** loss
+(population standard deviations); a per-mini-batch KGE is a different objective.
+
+**Reported metrics are fixed and are NOT chosen here:** a16 reports **KGE and NSE on untransformed
+$Q$** only, ranked by KGE, per `config/project.yaml`.
+:::
+
+# Scope and constraints {#sec-scope}
+
+The metrics in the *final* report are fixed by the user and by `config/project.yaml`
+(`evaluation_protocol.required_metrics: [KGE, NSE]`, `primary_selection_metric: KGE`,
+`final_report_metrics_only: true`). Agent 4 therefore does **not** choose the reporting metrics.
+What Agent 4 chooses is the **calibration objective**: the scalar that a10's optimisers and
+a11–a15's calibration runs drive to its optimum. Objective $\ne$ reporting metric is a deliberate
+and well-documented distinction [@clark2021; @mizukami2019]: the objective is an *estimator design
+choice* whose only job is to put parameters where the reported metrics will be good **on data the
+calibration never saw**.
+
+Three hard boundary conditions frame the choice:
+
+| # | Constraint | Consequence for the objective |
+|---|---|---|
+| 1 | Report = KGE and NSE on raw $Q$; KGE decides the ranking | The objective must be dominated by an untransformed KGE term; an objective built purely on transformed flows optimises the wrong thing |
+| 2 | Evaluation window (1949-01-01…1951-09-30) is the **wettest** stretch of the record: mean $Q$ 1.749 vs 1.353 mm/d (ratio 1.29), runoff ratio 0.41 vs 0.35, 1.7 % of days above the calibration $Q_{99}$, but max 45.9 mm/d **below** the calibration max 64.0 mm/d | No magnitude extrapolation is needed, but the objective must not buy calibration score by over-fitting the few largest floods, and must control the volume ratio $\beta$, which is what shifts under a wet transfer |
+| 3 | Only 92 warm-up days precede the evaluation metric window | Objectives that depend on long-memory low-flow behaviour (log, $1/Q$) are the most exposed to initial-state error early in 1949 |
+
+: Boundary conditions imposed on the objective choice. {#tbl-constraints}
+
+# Catalogue of metrics {#sec-catalogue}
+
+All formulas use $s_i$ = simulated and $o_i$ = observed daily flow (mm/day), $i=1\dots n$ over the
+metric window, $\mu$ = mean, $\sigma$ = standard deviation (population), $r$ = Pearson correlation.
+Every metric listed here is implemented in `src/common/metrics_extra.py` and registered in
+`mx.METRICS`, with `mx.ORIENTATION` (+1 larger-is-better, −1 smaller-is-better, 0 target-value) and
+`mx.OPTIMUM`. `KGE` and `NSE` themselves are imported from the canonical `src/common/metrics.py`.
+
+## Squared-error family
+
+$$
+\mathrm{MSE}=\frac1n\sum (s_i-o_i)^2,\qquad \mathrm{RMSE}=\sqrt{\mathrm{MSE}},\qquad
+\mathrm{NSE}=1-\frac{\sum (s_i-o_i)^2}{\sum (o_i-\mu_o)^2}
+$$
+
+$$
+\mathrm{NSE}_{T}=1-\frac{\sum (T(s_i)-T(o_i))^2}{\sum (T(o_i)-\mu_{T(o)})^2},\quad
+T\in\{\sqrt{\cdot},\ \log,\ 1/\cdot,\ \text{Box–Cox}_\lambda\},\qquad
+\mathrm{NNSE}=\frac{1}{2-\mathrm{NSE}}
+$$
+
+@gupta2009 decomposition, used throughout this report:
+$$
+\mathrm{NSE}=2\alpha r-\alpha^2-\beta_n^2,\qquad
+\alpha=\frac{\sigma_s}{\sigma_o},\quad \beta_n=\frac{\mu_s-\mu_o}{\sigma_o}.
+$$
+
+```{python}
+#| label: tbl-cat-sse
+#| tbl-cap: "Squared-error family. 'Sens.' = which part of the hydrograph dominates the score."
+rows = [
+ ("MSE / RMSE", r"$\frac1n\sum(s-o)^2$", "[0,∞)", "0", "mm²/d² / mm/d", "high flows (extreme)", "simple; RMSE in flow units; identical ranking to NSE and to the Gaussian MLE", "not comparable between basins/periods; ~1 % of days dominate", "@legates1999"),
+ ("NSE", r"$1-\frac{\sum(s-o)^2}{\sum(o-\mu_o)^2}$", "(−∞,1]", "1", "–", "high flows (extreme)", "normalised by observed variance; benchmark = mean flow; required by the project", "blind to volume bias when CV is large (@sec-why); biased low for short/skewed samples [@lamontagne2020]", "@nash1970"),
+ ("log-NSE", r"$\mathrm{NSE}$ on $\log Q$", "(−∞,1]", "1", "–", "low flows", "recessions and baseflow; near-Gaussian residuals here", "hypersensitive to small absolute errors at low flow; needs $\\varepsilon$ if $Q=0$ (not here)", "@oudin2006"),
+ ("sqrt-NSE", r"$\mathrm{NSE}$ on $\sqrt{Q}$", "(−∞,1]", "1", "–", "balanced (mid/high)", "variance-stabilising for Poisson-like skew; keeps peaks relevant", "no closed-form diagnostic split", "@oudin2006"),
+ ("inverse-NSE", r"$\mathrm{NSE}$ on $1/Q$", "(−∞,1]", "1", "–", "very low flows", "sharpest low-flow criterion", "numerically explosive; irrelevant for a perennial humid basin", "@pushpalatha2012"),
+ ("Box–Cox NSE", r"$T_\lambda(Q)=\frac{Q^\lambda-1}{\lambda}$", "(−∞,1]", "1", "–", "tunable by $\\lambda$", "one knob interpolates raw ($\\lambda=1$) → log ($\\lambda\\to0$); $\\lambda=0.25$ common", "extra parameter to justify", "@box1964"),
+ ("NNSE", r"$1/(2-\mathrm{NSE})$", "(0,1]", "1", "–", "as NSE", "bounded; convenient for sensitivity analysis", "monotone re-scaling only: identical ranking", "@nossent2012"),
+ ("weighted NSE", r"$1-\frac{\sum w_i(s-o)^2}{\sum w_i(o-\bar o_w)^2}$", "(−∞,1]", "1", "–", "chosen by $w$", "can up-weight seasons/events", "weights are arbitrary and hard to defend", "@krause2005"),
+ ("$R^2$", r"$r^2$", "[0,1]", "1", "–", "high flows", "shape only", "insensitive to bias and to variance errors — never use alone", "@legates1999"),
+]
+md(pd.DataFrame(rows, columns=["Metric","Formula","Range","Opt.","Units","Sens.","Strengths","Weaknesses","Ref."]), index=False)
+```
+
+## KGE family
+
+$$
+\mathrm{KGE}=1-\sqrt{(r-1)^2+(\alpha-1)^2+(\beta-1)^2},\qquad
+\alpha=\frac{\sigma_s}{\sigma_o},\quad \beta=\frac{\mu_s}{\mu_o}
+$$
+
+```{python}
+#| label: tbl-cat-kge
+#| tbl-cap: "KGE family. All are +1-oriented with optimum 1 and are dimensionless."
+rows = [
+ ("KGE (2009)", r"$1-\sqrt{(r-1)^2+(\alpha-1)^2+(\beta-1)^2}$", "(−∞,1]", "balanced", "explicit, orthogonal control of timing, variability and volume; project ranking metric", "mean-flow benchmark is −0.41, not 0 [@knoben2019]", "@gupta2009"),
+ ("KGE′ (2012)", r"$\gamma=\frac{\sigma_s/\mu_s}{\sigma_o/\mu_o}$ replaces $\alpha$", "(−∞,1]", "balanced", "removes the correlation between the $\\alpha$ and $\\beta$ terms", "$\\gamma$ is blind to a pure scaling error, so bias is penalised only once", "@kling2012"),
+ ("KGE″ (2021)", r"$\beta_n=\frac{\mu_s-\mu_o}{\sigma_o}$ replaces $\beta$", "(−∞,1]", "balanced", "stable when $\\mu_o\\to0$ (ephemeral rivers)", "at CV = 2.11 the bias term almost disappears — becomes NSE-like (@sec-why)", "@tang2021"),
+ ("non-parametric KGE", r"Spearman $r_S$, FDC-based $\alpha_{NP}=1-\tfrac12\sum|\tfrac{s_{(k)}}{n\mu_s}-\tfrac{o_{(k)}}{n\mu_o}|$", "(−∞,1]", "balanced, robust", "insensitive to the extreme tail; compares full FDC shape", "loses information on the magnitude of individual events", "@pool2018"),
+ ("KGE on $T(Q)$", r"KGE of $\sqrt{Q}$, $\log Q$, $1/Q$", "(−∞,1]", "set by $T$", "shifts emphasis while keeping the 3-way decomposition", "log-KGE is dominated by the smallest flows; $\\beta$ on logs is not a volume ratio [@santos2018]", "@santos2018"),
+ ("components $r,\\alpha,\\beta$", r"see above", "$r\\in[-1,1]$, $\\alpha,\\beta>0$", "diagnostic", "tells *why* a model fails; mandatory diagnostic in this project", "not a single ranking number", "@gupta2009"),
+ ("split KGE", r"$\frac1m\sum_j \mathrm{KGE}_j$ over sub-periods $j$", "(−∞,1]", "balanced in time", "exposes non-stationary performance; robust to one dominant year", "noisy for short windows", "@fowler2018"),
+ ("KGE skill score", r"$\frac{\mathrm{KGE}-\mathrm{KGE}_{\text{bench}}}{1-\mathrm{KGE}_{\text{bench}}}$", "(−∞,1]", "as KGE", "puts KGE on a 0 = benchmark scale", "benchmark must be declared", "@knoben2019; @seibert2001"),
+ ("DE (2021)", r"$1-\sqrt{\bar\delta_B^2+\delta_A^2+(1-r)^2}$ on relative FDC errors", "(−∞,1]", "FDC shape", "diagnoses constant vs dynamic bias separately", "young metric; relative errors blow up at low flow", "@schwemmle2021"),
+]
+md(pd.DataFrame(rows, columns=["Metric","Formula","Range","Sens.","Strengths","Weaknesses","Ref."]), index=False)
+```
+
+## Absolute-error, bias and agreement
+
+```{python}
+#| label: tbl-cat-bias
+#| tbl-cap: "Absolute-error / bias / agreement metrics."
+rows = [
+ ("MAE", r"$\frac1n\sum|s-o|$", "[0,∞)", "0", "mm/d", "mid/low flows", "robust to outliers; flow units", "insensitive to peak errors; not normalised", "@legates1999"),
+ ("PBIAS", r"$100\frac{\sum(s-o)}{\sum o}$", "(−100,∞)", "0", "%", "volume", "direct water-balance check; **here positive = over-prediction**, the negative of the @moriasi2007 sign", "says nothing about dynamics", "@moriasi2007"),
+ ("VE", r"$\frac{\sum s}{\sum o}-1=\beta-1$", "(−1,∞)", "0", "–", "volume", "identical information to KGE's $\\beta$", "as PBIAS", "@moriasi2007"),
+ ("MARE", r"$\frac1n\sum\frac{|s-o|}{o}$", "[0,∞)", "0", "–", "low flows", "scale free", "explodes at small $o$; asymmetric", "@legates1999"),
+ ("Pearson $r$", r"$\mathrm{corr}(s,o)$", "[−1,1]", "1", "–", "high flows/timing", "component of KGE", "blind to bias and amplitude", "@legates1999"),
+ ("Spearman $\\rho$", r"corr of ranks", "[−1,1]", "1", "–", "shape, robust", "insensitive to the heavy tail", "loses magnitude", "@pool2018"),
+ ("Willmott $d$", r"$1-\frac{\sum(s-o)^2}{\sum(|s-\mu_o|+|o-\mu_o|)^2}$", "[0,1]", "1", "–", "high flows", "bounded; sensitive to additive and proportional differences", "compresses differences near 1; hard to interpret", "@willmott1981"),
+ ("$d_1$, $d_r$", r"absolute-error versions", "[0,1] / [−1,1]", "1", "–", "mid flows", "$d_r$ is the bounded MAE-based analogue of NSE", "rarely reported in hydrology", "@willmott2012"),
+]
+md(pd.DataFrame(rows, columns=["Metric","Formula","Range","Opt.","Units","Sens.","Strengths","Weaknesses","Ref."]), index=False)
+```
+
+## Likelihood-based criteria
+
+Relevant only if a10 recommends a Bayesian sampler (DREAM). They are *objective functions with a
+probabilistic interpretation*, so they can be maximised exactly like KGE.
+
+```{python}
+#| label: tbl-cat-lik
+#| tbl-cap: "Likelihood functions implemented in metrics_extra (log-likelihoods, maximise)."
+rows = [
+ ("Gaussian i.i.d.", r"$-\frac n2\left[\log\frac{2\pi\,\mathrm{SSE}}{n}+1\right]$ (σ profiled out)", "closed form, no nuisance parameter", "monotone in SSE ⇒ **identical argmax to NSE/RMSE**; inherits all their high-flow leverage", "@sorooshian1993"),
+ ("Box–Cox / log-sinh", r"Gaussian on $T_\lambda(Q)$ + Jacobian $(\lambda-1)\sum\log o_i$", "handles heteroscedasticity explicitly; $\\lambda$ can be inferred", "the Jacobian makes the value non-comparable across $\\lambda$", "@schoups2010"),
+ ("AR(1) residuals", r"$e_t-\phi e_{t-1}$ whitened Gaussian", "accounts for the strong serial correlation of daily residuals (ACF$_1(Q)=0.888$)", "$\\phi$ is a nuisance parameter; can mask structural error", "@sorooshian1980"),
+ ("Generalized likelihood (GL)", r"skew exponential power errors, $\sigma_t=\sigma_0+\sigma_1 s_t$, AR(1)", "most defensible error model; gives calibrated predictive uncertainty", "4–5 extra parameters; ≥10× the sampling cost; overkill for a deterministic ranking", "@schoups2010"),
+]
+md(pd.DataFrame(rows, columns=["Criterion","Formula","Strengths","Weaknesses","Ref."]), index=False)
+```
+
+## Event / peak, FDC-segment and signature metrics
+
+These are **diagnostics**, never the objective here (they are not differentiable, not smooth, and
+several are undefined for poor simulations). They are used in @sec-transfer to explain *why* an
+objective transfers well or badly.
+
+```{python}
+#| label: tbl-cat-sig
+#| tbl-cap: "Event, FDC-segment and signature metrics (all target value 0 unless stated)."
+rows = [
+ ("FHV", r"$100\frac{\sum_{h}(s_{(h)}-o_{(h)})}{\sum_h o_{(h)}}$, top 2 % of the FDC", "%", "high-flow volume bias", "@yilmaz2008"),
+ ("FLV", r"$100\frac{[\sum(\log s_{(l)}-\log s_{\min})]-[\sum(\log o_{(l)}-\log o_{\min})]}{\sum(\log o_{(l)}-\log o_{\min})}$, lowest 30 %", "%", "low-flow (baseflow) bias", "@yilmaz2008"),
+ ("FMS", r"$100\frac{m_s-m_o}{m_o}$, $m=\frac{\log Q_{20\%}-\log Q_{70\%}}{0.5}$", "%", "mid-segment FDC slope = flow variability / storage", "@yilmaz2008"),
+ ("peak error", r"$\frac1k\sum_{j=1}^{k}\frac{s_j-o_j}{o_j}$ over the $k$ largest observed days", "–", "flood magnitude", "@mizukami2019"),
+ ("peak timing", r"mean $|\arg\max_{\pm w} s - t_{\text{peak},o}|$", "days", "routing/response time", "@kratzert2021"),
+ ("BFI error", r"$\mathrm{BFI}(s)-\mathrm{BFI}(o)$, Lyne–Hollick $\alpha=0.925$, 3 passes", "–", "flow-path partition (obs 0.41)", "@lyne1979; @nathan1990"),
+ ("recession error", r"median $Q_{t+1}/Q_t$ on falling limbs $\ge5$ d", "1/d", "storage–discharge relation (obs $k=0.896$)", "@brutsaert1977"),
+ ("flashiness error", r"$\frac{\sum|Q_t-Q_{t-1}|}{\sum Q_t}$ difference (obs 0.316)", "–", "event response", "@baker2004"),
+ ("ACF(1) error", r"$\rho_1(s)-\rho_1(o)$ (obs 0.888)", "–", "memory / over-smoothing", "a02 EDA"),
+ ("FDC slope error", r"$\frac{\log Q_{33\%}-\log Q_{66\%}}{0.33}$ difference (obs 3.50)", "–", "flow-duration shape", "@sawicz2011"),
+ ("FDC $W_1$ (log)", r"$\frac1n\sum_k|\log q^{s}_{(k)}-\log q^{o}_{(k)}|$", "log mm/d", "1-Wasserstein distance between flow distributions (ignores timing entirely)", "@pool2018"),
+]
+md(pd.DataFrame(rows, columns=["Metric","Formula","Units","What it diagnoses","Ref."]), index=False)
+```
+
+::: {.callout-note}
+## Information-theoretic and probabilistic scores
+Mutual information $I(s;o)$, CRPS and Wasserstein distances were considered. CRPS requires a
+predictive *distribution*; all five model slots are deterministic and the final ranking is
+deterministic, so CRPS is only meaningful if an ensemble is submitted — it is therefore not part of
+the objective and not part of the report. The 1-Wasserstein distance between FDCs **is** implemented
+(`FDC_W1_log`) because it is a pure distribution-shape diagnostic: a model can have $W_1=0$ and
+$r=0$, which makes it a clean complement to KGE's $r$ term. Mutual information was rejected as an
+objective: on 13 149 daily values it needs binning/KDE choices that are themselves tuning
+parameters, and it is invariant to any monotone transform — including a 50 % volume bias.
+:::
+
+# Why this particular data set constrains the choice {#sec-why}
+
+```{python}
+#| label: fig-leverage
+#| fig-cap: "Leverage of the largest flows. Left: share of total volume and of the NSE denominator $\\sum(o-\\mu_o)^2$ carried by the wettest days (calibration metric window). Right: the same share of the squared-error 'gradient mass' under three transforms."
+s_sorted = np.sort(O)[::-1]
+frac = np.arange(1, len(O) + 1) / len(O)
+cum_vol = np.cumsum(s_sorted) / s_sorted.sum()
+d2 = (s_sorted - O.mean()) ** 2
+cum_ss = np.cumsum(d2) / d2.sum()
+
+lev = {}
+for nm, x in (("$Q$", O), ("$\\sqrt{Q}$", np.sqrt(O)), ("$\\log Q$", np.log(O))):
+    xs = np.sort(x)[::-1]; dd = (xs - x.mean()) ** 2
+    lev[nm] = np.cumsum(dd) / dd.sum()
+
+fig, ax = plt.subplots(1, 2, figsize=(9.5, 3.4))
+ax[0].plot(100 * frac, 100 * cum_vol, label="share of total volume")
+ax[0].plot(100 * frac, 100 * cum_ss, label=r"share of $\sum(o-\mu_o)^2$ (NSE denominator)")
+ax[0].set_xscale("log"); ax[0].set_xlim(0.05, 100); ax[0].set_xlabel("wettest x % of days")
+ax[0].set_ylabel("cumulative share (%)"); ax[0].legend(loc="lower right")
+ax[0].axvline(1, color="0.5", lw=0.8, ls=":"); ax[0].axvline(5, color="0.5", lw=0.8, ls=":")
+ax[0].set_title("Volume vs squared-error leverage")
+for nm, v in lev.items():
+    ax[1].plot(100 * frac, 100 * v, label=nm)
+ax[1].set_xscale("log"); ax[1].set_xlim(0.05, 100); ax[1].set_xlabel("wettest x % of days")
+ax[1].set_ylabel("share of $\\sum(T(o)-\\mu)^2$ (%)"); ax[1].legend(title="transform")
+ax[1].axvline(1, color="0.5", lw=0.8, ls=":"); ax[1].axvline(5, color="0.5", lw=0.8, ls=":")
+ax[1].set_title("Effect of the transform on leverage")
+save(fig, "leverage"); plt.show()
+
+tbl = []
+for p in (0.01, 0.02, 0.05, 0.10):
+    k = int(p * len(O))
+    row = {"wettest % of days": 100 * p, "% of volume": 100 * s_sorted[:k].sum() / s_sorted.sum()}
+    for nm, x in (("Q", O), ("sqrt Q", np.sqrt(O)), ("log Q", np.log(O))):
+        xs = np.sort(x)[::-1]; dd = (xs - x.mean()) ** 2
+        row[f"% of SS ({nm})"] = 100 * dd[:k].sum() / dd.sum()
+    tbl.append(row)
+LEVERAGE = pd.DataFrame(tbl)
+md(LEVERAGE.round(1), index=False)
+```
+
+**Fact 1 — one per cent of the days own the squared-error criterion.** In the calibration metric
+window the wettest 1 % of days (131 of 13 149) carry 15.7 % of the volume but **58.3 %** of
+$\sum(o-\mu_o)^2$; the wettest 5 % carry 83.6 %. Any SSE-based objective (MSE, RMSE, NSE, Gaussian
+likelihood — all with the same argmax) is therefore, in effect, fitted to ~130 flood days.
+The $\sqrt{\cdot}$ transform reduces the 1 % share to 26.8 % and $\log$ to 8.7 %: these numbers,
+not a preference, are what "balancing high and low flows" means here.
+
+**Fact 2 — NSE is nearly blind to volume bias at this CV, KGE is not.** For a simulation with the
+right shape but a volume ratio $\beta=c$ ($r=1$, $\alpha=c$),
+
+$$
+\mathrm{KGE}=1-\sqrt2\,|c-1| \quad\text{(both } \alpha \text{ and } \beta \text{ terms)},\qquad
+\mathrm{NSE}=1-\Big(\tfrac{c-1}{\mathrm{CV}_o}\Big)^2\ \text{if only the mean is wrong},
+$$
+
+and $\mathrm{CV}_o=2.107$ here.
+
+```{python}
+#| label: tbl-bias-sens
+#| tbl-cap: "Penalty of a pure volume error at the Leaf River calibration CV = 2.107. 'KGE (β only)' isolates the volume term; 'NSE (mean only)' is the corresponding NSE loss. The last column is how many times harder KGE punishes the same water-balance error."
+rows = []
+for c in (0.85, 0.90, 0.95, 1.05, 1.10, 1.20, 1.30):
+    dk = abs(c - 1.0)                      # KGE loss from the beta term alone
+    dn = ((c - 1.0) / CV_O) ** 2           # NSE loss from the mean alone
+    dk_full = np.sqrt(2) * abs(c - 1.0)    # KGE loss when alpha scales too
+    rows.append({"β = Q_sim/Q_obs": c, "ΔKGE (β term only)": dk,
+                 "ΔKGE (α and β, sim = c·obs)": dk_full,
+                 "ΔNSE (mean only)": dn, "ratio ΔKGE/ΔNSE": dk / dn})
+BIAS = pd.DataFrame(rows)
+md(BIAS.round({"β = Q_sim/Q_obs": 2, "ΔKGE (β term only)": 4, "ΔKGE (α and β, sim = c·obs)": 4,
+               "ΔNSE (mean only)": 5, "ratio ΔKGE/ΔNSE": 1}), index=False)
+```
+
+A model that is 10 % too wet loses **0.100 KGE but only 0.0023 NSE** — a factor 44. This is the
+single most important asymmetry for this project: calibrating on NSE lets the optimiser trade
+water balance for a slightly better fit to floods almost for free, and that debt is paid in full in
+the KGE ranking — *and it is paid on a period 29 % wetter than the one the trade was made on.*
+The same algebra explains why KGE″ [@tang2021], whose bias term is $\beta_n=(\mu_s-\mu_o)/\sigma_o$,
+behaves almost like NSE here: at CV = 2.107 it divides the bias by 2.1 before squaring it.
+
+**Fact 3 — no offset $\varepsilon$ is needed.** a02 verified $Q>0$ on all 14 610 days
+(min 0.069 mm/day, quantised at 1 ft³/s over 1 949 km²). Every $\log$, $\sqrt{}$, $1/Q$ and Box–Cox
+statistic in this report is therefore computed with $\varepsilon=0$, which removes the usual
+arbitrary-constant problem [@pushpalatha2012; @santos2018]: an $\varepsilon$ is a hidden tuning
+parameter that silently sets *which* low flows the objective can see. Only simulated flows are
+floored (at $10^{-12}$ mm/day) so that a degenerate model cannot return $-\infty$.
+
+```{python}
+#| label: fig-transform
+#| fig-cap: "Distribution of observed daily Q in the calibration metric window under the four candidate transforms (no offset needed: min Q = 0.069 mm/day)."
+fig, ax = plt.subplots(1, 4, figsize=(11, 2.6))
+for a, (nm, x) in zip(ax, [("$Q$", O), ("$\\sqrt{Q}$", np.sqrt(O)),
+                           ("Box–Cox $\\lambda=0.25$", mx.t_boxcox(O, 0.25)), ("$\\log Q$", np.log(O))]):
+    a.hist(x, bins=60, color="steelblue")
+    sk = float(((x - x.mean()) ** 3).mean() / x.std() ** 3)
+    a.set_title(f"{nm}\nskew = {sk:.2f}"); a.set_yticks([])
+save(fig, "transforms"); plt.show()
+```
+
+# Benchmarks {#sec-benchmarks}
+
+```{python}
+#| label: tbl-benchmarks
+#| tbl-cap: "Reference points on the calibration metric window (1952-10-01…1988-09-30). A model is only skilful above these."
+bench = {}
+bench["mean flow (constant)"] = mx.benchmark_mean_flow(O)
+bench["day-of-year climatology (15-d smoothed)"] = mx.benchmark_climatology(O, IDX[MM], smooth=15)
+bench["day-of-year climatology (raw)"] = mx.benchmark_climatology(O, IDX[MM], smooth=1)
+pers = np.r_[O[0], O[:-1]]
+bench["persistence Q(t) = Q(t-1)"] = {"NSE": nse(pers, O), "KGE": kge(pers, O),
+                                      **{k: v for k, v in kge_components(pers, O).items() if k != "KGE"}}
+lh = mx._lyne_hollick(O)
+bench["baseflow only (Lyne–Hollick)"] = {"NSE": nse(lh, O), "KGE": kge(lh, O),
+                                         **{k: v for k, v in kge_components(lh, O).items() if k != "KGE"}}
+BENCH = pd.DataFrame(bench).T[["KGE", "NSE", "r", "alpha", "beta"]]
+md(BENCH.round(3))
+```
+
+The mean-flow benchmark is the reference every reader mis-remembers: **NSE = 0 but KGE = $1-\sqrt2$
+= −0.414**, not 0 [@knoben2019]. KGE = 0 is already a *non-trivial* model. A day-of-year climatology
+— which uses no forcing at all — reaches KGE ≈ 0.08 / NSE ≈ 0.13 here, and one-day persistence
+reaches KGE 0.89 / NSE 0.78 because ACF$_1$ = 0.888. Persistence is the benchmark a16 should keep in
+mind: a rainfall–runoff model that cannot beat NSE 0.78 has added nothing over "tomorrow = today".
+Published values at this gauge (a01): NWM v2.1 KGE 0.72/NSE 0.71, SAC-SMA 0.80, HBV 0.82,
+regional LSTM 0.84–0.86.
+
+# Experiment 1 — how the candidate metrics react to known errors {#sec-synthetic}
+
+Fifteen synthetic "simulations" are built **from the observed calibration series only**, each
+carrying one controlled, hydrologically meaningful defect. Every metric is then computed on the
+calibration metric window. This is the standard way to read a metric's fingerprint
+[@krause2005; @schwemmle2021]: it shows which metric can *see* which error.
+
+```{python}
+#| label: synthetic-build
+def mav(x, k):
+    return pd.Series(x).rolling(k, center=True, min_periods=1).mean().to_numpy()
+
+rng = np.random.default_rng(SEED)
+doy = IDX[MM].dayofyear.to_numpy()
+clim = mav(pd.Series(O).groupby(doy).transform("mean").to_numpy(), 15)
+
+SIMS = {
+    "volume ×0.8":              0.8 * O,
+    "volume ×1.2":              1.2 * O,
+    "+1 d late":                np.r_[O[0], O[:-1]],
+    "−1 d early":               np.r_[O[1:], O[-1]],
+    "7-d over-smoothed":        mav(O, 7),
+    "baseflow only":            mx._lyne_hollick(O),
+    "day-of-year climatology":  clim,
+    "mean flow":                np.full_like(O, O.mean()),
+    "peaks −30 % (top 2 %)":    np.where(O >= np.quantile(O, 0.98), 0.7 * O, O),
+    "low flows ×2 (bot. 30 %)": np.where(O <= np.quantile(O, 0.30), 2.0 * O, O),
+    "log-variance ×0.7":        np.exp(np.log(O).mean() + 0.7 * (np.log(O) - np.log(O).mean())),
+    "log-variance ×1.3":        np.exp(np.log(O).mean() + 1.3 * (np.log(O) - np.log(O).mean())),
+    "multiplicative noise 30 %": O * np.exp(rng.normal(0, 0.3, len(O))),
+    "additive noise 0.3 mm/d":  np.maximum(O + rng.normal(0, 0.3, len(O)), 1e-3),
+    "perfect":                  O.copy(),
+}
+NAMES = ["KGE", "NSE", "NSE_sqrt", "NSE_log", "NSE_inv", "KGE_sqrt", "KGE_log",
+         "KGE_2012", "KGE_2021", "KGE_np", "DE", "KGE_mix_sqrt",
+         "KGE_r", "KGE_alpha", "KGE_beta", "RMSE", "MAE", "PBIAS", "rho", "d",
+         "FHV", "FLV", "FMS", "peak_timing", "BFI_err", "FDC_W1_log"]
+SYN = pd.DataFrame({k: mx.evaluate_all(v, O, NAMES) for k, v in SIMS.items()}).T
+```
+
+```{python}
+#| label: fig-heatmap
+#| fig-cap: "Metric fingerprint of 15 controlled defects (calibration metric window, 13 149 d). Cells show the metric value; colour = loss relative to the perfect value, clipped at −1 for readability. Bounded, +1-oriented efficiency metrics only."
+eff = ["KGE", "NSE", "NSE_sqrt", "NSE_log", "NSE_inv", "KGE_sqrt", "KGE_log",
+       "KGE_2012", "KGE_2021", "KGE_np", "DE", "KGE_mix_sqrt", "KGE_r", "d", "rho"]
+H = SYN[eff].astype(float)
+fig, ax = plt.subplots(figsize=(11, 5.2))
+sns.heatmap(H.clip(lower=-1), annot=H.round(2), fmt="", cmap="RdYlGn", vmin=-1, vmax=1,
+            linewidths=.4, cbar_kws={"label": "value (clipped at −1)"}, annot_kws={"size": 7}, ax=ax)
+ax.set_title("Experiment 1: sensitivity of efficiency metrics to controlled defects")
+plt.xticks(rotation=45, ha="right"); save(fig, "synthetic_heatmap"); plt.show()
+```
+
+```{python}
+#| label: tbl-synthetic-diag
+#| tbl-cap: "The same experiment for the diagnostic (non-efficiency) metrics. Target value is 0 for all of them except KGE_alpha/KGE_beta (target 1) and peak_timing (days, target 0)."
+md(SYN[["KGE_alpha", "KGE_beta", "RMSE", "MAE", "PBIAS", "FHV", "FLV", "FMS",
+        "peak_timing", "BFI_err", "FDC_W1_log"]].astype(float).round(2))
+```
+
+What the fingerprint says, in the order that matters for the decision:
+
+1. **Volume bias.** ±20 % volume costs KGE 0.283 but NSE only 0.049 — the algebra of @tbl-bias-sens
+   confirmed empirically. log-NSE (0.97) and sqrt-NSE (0.97) are even blinder. Only the KGE family,
+   PBIAS/VE and FHV react properly.
+2. **Timing.** A one-day shift costs NSE 0.220 but KGE only 0.110 (KGE loses only through $r$).
+   NSE is the stronger timing criterion; KGE is the stronger water-balance criterion. They are
+   complementary, which is exactly why the project reports both.
+3. **Variance errors.** Inflating the variance in log space by 30 % gives KGE −1.17 and NSE −3.27
+   while **log-NSE stays at 0.910 and KGE_log at 0.700**. A log-based objective literally cannot see
+   a catastrophic error in the raw-flow variance — a decisive argument against calibrating on
+   $\log Q$ when the report is on raw $Q$ [@santos2018].
+4. **Low-flow instability.** Adding 0.3 mm/d of white noise (a trivial error at flood flows) leaves
+   KGE at 0.976 but drives log-NSE to −1.50 and inverse-NSE to −15 554. Inverse and log objectives
+   are numerically dominated by the smallest flows of a perennial river; they are unusable as a
+   primary objective here and are kept only as diagnostics.
+5. **Over-smoothing** (7-day moving average, i.e. a model with too much storage) is punished by
+   KGE (0.785 via $\alpha$ = 0.81) and by FHV (−20 %) but barely by log-NSE (0.913) — another
+   transform-blindness.
+6. **Peak truncation** (top 2 % cut by 30 %) costs KGE 0.229 and NSE 0.074 but *improves* log-NSE
+   and inverse-NSE to ≈1.00. FHV = −27.6 % detects it cleanly, which is why FHV is retained as the
+   mandatory high-flow diagnostic.
+
+# Experiment 2 — which objective transfers best to an independent, wetter period? {#sec-transfer}
+
+This is the decision-relevant experiment. @sec-synthetic shows what a metric *sees*; it does not
+show what happens when a metric is *optimised*. Here two surrogate rainfall–runoff models are
+calibrated with 24 candidate objectives and the resulting parameter sets are scored with the
+**reported** metrics (KGE, NSE on raw $Q$) on data withheld from that calibration.
+
+::: {.callout-warning}
+## Lane and leakage statement
+The two models below are **experimental surrogates internal to this report**, not project model
+slots (those are a03/a05–a09's outputs; nothing is written to `src/models/`). Every split used here
+lives strictly inside the calibration window; `src.common.data.slice_run(df, "evaluation")` is never
+called and `LR_AGENT` is never set. The evaluation window contributes nothing — not even a summary
+statistic — to the objective choice.
+:::
+
+## Design
+
+* **Surrogate 1 — HyMOD** (5 parameters: $C_{max}$, $b_{exp}$, $\alpha$, $R_s$, $R_q$): a PDM
+  storage [@moore1985] feeding one slow and three quick linear reservoirs. HyMOD *is* the classic
+  Leaf River model [@boyle2000; @vrugt2003], which makes it the most defensible surrogate available.
+* **Surrogate 2 — NLRes** (5 parameters: $S_{max}$, $\beta$, $d$, $k_f$, $k_s$): HBV-style power-law
+  saturation runoff, a linear fast reservoir and a **non-linear** slow reservoir $q=k_sS^{1.5}$,
+  chosen because a02 found a non-linear recession (Brutsaert–Nieber $b=1.68$). Two structurally
+  different surrogates guard against a conclusion that is an artefact of one model.
+* **Optimiser:** SciPy `differential_evolution`, seed 42, popsize 15, maxiter 150, tol $10^{-8}$,
+  polish — identical budget for every objective, so differences are attributable to the objective.
+* **Splits (all inside calibration):**
+
+```{python}
+#| label: exp2-setup
+from numba import njit, prange
+
+@njit(cache=True, fastmath=True)
+def _hymod(P, E, cmax, bexp, alpha, Rs, Rq):
+    n = P.shape[0]; Q = np.empty(n)
+    x_loss = 0.0; x_slow = 2.3503 / (Rs * 22.5); x_q1 = x_q2 = x_q3 = 0.0
+    b1 = bexp + 1.0; cm_b = cmax / b1
+    for t in range(n):
+        Pval = P[t]; PETval = E[t]; xn_prev = x_loss
+        arg = 1.0 - b1 * xn_prev / cmax
+        if arg < 0.0: arg = 0.0
+        ct_prev = cmax * (1.0 - arg ** (1.0 / b1))
+        UT1 = Pval - cmax + ct_prev
+        if UT1 < 0.0: UT1 = 0.0
+        Pval = Pval - UT1
+        dummy = (ct_prev + Pval) / cmax
+        if dummy > 1.0: dummy = 1.0
+        xn = cm_b * (1.0 - (1.0 - dummy) ** b1)
+        UT2 = Pval - (xn - xn_prev)
+        if UT2 < 0.0: UT2 = 0.0
+        evap = (1.0 - (cm_b - xn) / cm_b) * PETval
+        if evap > xn: evap = xn
+        x_loss = xn - evap
+        UQ = alpha * (UT1 + UT2); US = (1.0 - alpha) * (UT1 + UT2)
+        x_slow = (1.0 - Rs) * x_slow + (1.0 - Rs) * US; QS = (Rs / (1.0 - Rs)) * x_slow
+        x_q1 = (1.0 - Rq) * x_q1 + (1.0 - Rq) * UQ;  o1 = (Rq / (1.0 - Rq)) * x_q1
+        x_q2 = (1.0 - Rq) * x_q2 + (1.0 - Rq) * o1;  o2 = (Rq / (1.0 - Rq)) * x_q2
+        x_q3 = (1.0 - Rq) * x_q3 + (1.0 - Rq) * o2;  o3 = (Rq / (1.0 - Rq)) * x_q3
+        q = QS + o3
+        Q[t] = q if q > 1e-9 else 1e-9
+    return Q
+
+@njit(cache=True, fastmath=True)
+def _nlres(P, E, Smax, beta, d, kf, ks):
+    n = P.shape[0]; Q = np.empty(n)
+    S = 0.5 * Smax; Sf = 0.0; Ss = 10.0
+    for t in range(n):
+        p = P[t]; ratio = S / Smax
+        if ratio > 1.0: ratio = 1.0
+        r = p * ratio ** beta
+        S = S + p - r
+        ea = E[t] * (S / Smax)
+        if ea > S: ea = S
+        S = S - ea
+        if S > Smax:
+            r += S - Smax; S = Smax
+        Sf = Sf + d * r; qf = kf * Sf; Sf = Sf - qf
+        Ss = Ss + (1.0 - d) * r; qs = ks * Ss ** 1.5
+        if qs > Ss: qs = Ss
+        Ss = Ss - qs
+        q = qf + qs
+        Q[t] = q if q > 1e-9 else 1e-9
+    return Q
+
+@njit(parallel=True, cache=True)
+def simulate_batch(P, E, theta, which):
+    ns = theta.shape[0]; nt = P.shape[0]; out = np.empty((ns, nt))
+    for i in prange(ns):
+        if which == 0:
+            out[i] = _hymod(P, E, theta[i, 0], theta[i, 1], theta[i, 2], theta[i, 3], theta[i, 4])
+        else:
+            out[i] = _nlres(P, E, theta[i, 0], theta[i, 1], theta[i, 2], theta[i, 3], theta[i, 4])
+    return out
+
+BOUNDS = {0: np.array([[1.0, 500.0], [0.1, 2.0], [0.10, 0.99], [0.0005, 0.15], [0.10, 0.95]]),
+          1: np.array([[50.0, 800.0], [0.5, 6.0], [0.05, 0.95], [0.05, 0.90], [0.001, 0.20]])}
+PNAMES = {0: ["cmax", "bexp", "alpha", "Rs", "Rq"], 1: ["Smax", "beta", "d", "kf", "ks"]}
+
+CANDIDATES = {
+    "NSE": mx.nse, "KGE": kge, "KGE_2012": mx.kge_2012, "KGE_2021": mx.kge_2021,
+    "KGE_np": mx.kge_np, "NSE_sqrt": mx.nse_sqrt, "NSE_log": mx.nse_log, "NSE_inv": mx.nse_inv,
+    "NSE_bc025": lambda s, o: mx.nse_boxcox(s, o, lam=0.25),
+    "KGE_sqrt": mx.kge_sqrt, "KGE_log": mx.kge_log,
+    "KGEmix_sqrt50": lambda s, o: mx.kge_mix(s, o, w=0.50, transform="sqrt"),
+    "KGEmix_sqrt75": lambda s, o: mx.kge_mix(s, o, w=0.75, transform="sqrt"),
+    "KGEmix_log50":  lambda s, o: mx.kge_mix(s, o, w=0.50, transform="log"),
+    "NSEmix_log50":  lambda s, o: mx.nse_mix(s, o, w=0.50, transform="log"),
+    "KGE_NSE_50":    lambda s, o: mx.kge_nse_mix(s, o, w=0.50),
+    "negMAE": lambda s, o: -mx.mae(s, o), "DE": mx.de_metric,
+    # three post-hoc variants used to check whether a transformed third term adds anything
+    "KNS_333": lambda s, o: (kge(s, o) + mx.nse(s, o) + mx.kge_sqrt(s, o)) / 3.0,
+    "KNS_442": lambda s, o: 0.4 * kge(s, o) + 0.4 * mx.nse(s, o) + 0.2 * mx.kge_sqrt(s, o),
+    "KN_7030": lambda s, o: 0.7 * kge(s, o) + 0.3 * mx.nse(s, o),
+    "negFDC_W1": lambda s, o: -mx.fdc_wasserstein(s, o),
+    "LL_bc025": lambda s, o: mx.loglik_boxcox(s, o, lam=0.25) / 1e4,
+    "Willmott_d": mx.willmott_d,
+}
+# objectives carried through ALL four splits (the expensive part); the remaining candidates are
+# screened on the temporal split only. KGE_np and NSE_log are screened only (KGE_np costs ~4x).
+CORE = ["NSE", "KGE", "KGE_2012", "NSE_sqrt", "KGE_sqrt", "KGE_log",
+        "KGEmix_sqrt50", "KGEmix_sqrt75", "KGE_NSE_50", "negMAE",
+        "KNS_333", "KNS_442", "KN_7030"]
+WETBLOCKS = [(1971, 1973), (1979, 1981), (1961, 1963)]
+
+SPLITS = {"temporal (WY1982–88, drier)": (TR, VA)}
+for a, b in WETBLOCKS:
+    blk = np.arange(a, b + 1)
+    SPLITS[f"wet WY{a}–{b}"] = (MM & ~np.isin(WY, blk), MM & np.isin(WY, blk))
+
+SPLIT_INFO = pd.DataFrame({k: dict(n_train=int(tr.sum()), n_test=int(te.sum()),
+                                   meanQ_train=OBS[tr].mean(), meanQ_test=OBS[te].mean(),
+                                   ratio=OBS[te].mean() / OBS[tr].mean(),
+                                   maxQ_train=OBS[tr].max(), maxQ_test=OBS[te].max())
+                           for k, (tr, te) in SPLITS.items()}).T
+md(SPLIT_INFO.round(3))
+```
+
+The evaluation window has mean-$Q$ ratio **1.29** relative to calibration and a maximum
+(45.9 mm/d) **below** the calibration maximum (64.0). The three "wet" splits reproduce exactly that
+situation inside calibration — ratio 1.20–1.46, test maximum always below the training maximum — so
+a model must extrapolate in *wetness* but not in *magnitude*. The temporal split is the useful
+mirror image (test 6 % drier than train): an objective that is robust must survive both directions.
+
+## Results
+
+```{python}
+#| label: exp2-run
+from scipy.optimize import differential_evolution
+
+def optimise(mask, which, fobj, seed=SEED, maxiter=150, popsize=15):
+    b = BOUNDS[which]; o = OBS[mask]
+    def cost(th):
+        s = simulate_batch(P, PET, np.atleast_2d(th), which)[0]
+        v = fobj(s[mask], o)
+        return -v if np.isfinite(v) else 1e6
+    res = differential_evolution(cost, list(map(tuple, b)), seed=seed, maxiter=maxiter,
+                                 popsize=popsize, tol=1e-8, mutation=(0.3, 1.0),
+                                 recombination=0.9, polish=True, init="sobol", workers=1)
+    return res.x, -res.fun
+
+t0 = time.time(); rows = []
+for which, mname in ((0, "HyMOD"), (1, "NLRes")):
+    for sname, (mtr, mte) in SPLITS.items():
+        names = list(CANDIDATES) if sname.startswith("temporal") else CORE
+        for cname in names:
+            th, val = optimise(mtr, which, CANDIDATES[cname])
+            s = simulate_batch(P, PET, np.atleast_2d(th), which)[0]
+            rows.append(dict(model=mname, split=sname, objective=cname, obj_train=val,
+                             KGE_train=kge(s[mtr], OBS[mtr]), NSE_train=nse(s[mtr], OBS[mtr]),
+                             KGE_test=kge(s[mte], OBS[mte]), NSE_test=nse(s[mte], OBS[mte]),
+                             r_test=mx.kge_r(s[mte], OBS[mte]), a_test=mx.kge_alpha(s[mte], OBS[mte]),
+                             b_test=mx.kge_beta(s[mte], OBS[mte]),
+                             a_train=mx.kge_alpha(s[mtr], OBS[mtr]), b_train=mx.kge_beta(s[mtr], OBS[mtr]),
+                             logNSE_test=mx.nse_log(s[mte], OBS[mte]),
+                             FHV_test=mx.fhv(s[mte], OBS[mte]), FLV_test=mx.flv(s[mte], OBS[mte]),
+                             PBIAS_test=mx.pbias(s[mte], OBS[mte]),
+                             **{f"p_{k}": float(v) for k, v in zip(PNAMES[which], th)}))
+R = pd.DataFrame(rows)
+print(f"{len(R)} calibrations in {time.time()-t0:.0f} s "
+      f"({R.model.nunique()} surrogates x {R.split.nunique()} splits x up to {len(CANDIDATES)} objectives)")
+```
+
+```{python}
+#| label: tbl-transfer-temporal
+#| tbl-cap: "Temporal split: calibrate on WY1953–1981 (10 592 d), test on WY1982–1988 (2 557 d, 6 % drier). All 24 candidate objectives. Sorted by mean test KGE over the two surrogates."
+T = R[R.split.str.startswith("temporal")]
+piv = (T.pivot_table(index="objective", columns="model",
+                     values=["KGE_test", "NSE_test", "b_test", "a_test"]))
+piv.columns = [f"{m}_{v.split('_')[0]}" for v, m in piv.columns]
+piv["mean_KGE"] = T.groupby("objective").KGE_test.mean()
+piv["mean_NSE"] = T.groupby("objective").NSE_test.mean()
+piv = piv.sort_values("mean_KGE", ascending=False)
+md(piv.round(3))
+```
+
+```{python}
+#| label: tbl-transfer-wet
+#| tbl-cap: "Wet-shift splits: calibrate on all calibration water years except one wet 3-year block, test on that block (20–46 % wetter than the training years). Mean over the three blocks and the two surrogates; ΔKGE = test − train."
+W = R[~R.split.str.startswith("temporal")]
+agg = (W.groupby("objective")
+         .agg(KGE_test=("KGE_test", "mean"), NSE_test=("NSE_test", "mean"),
+              KGE_train=("KGE_train", "mean"), NSE_train=("NSE_train", "mean"),
+              beta_test=("b_test", "mean"), alpha_test=("a_test", "mean"),
+              PBIAS_test=("PBIAS_test", "mean"), FHV_test=("FHV_test", "mean"),
+              KGE_test_min=("KGE_test", "min"), KGE_test_sd=("KGE_test", "std")))
+agg["dKGE"] = agg.KGE_test - agg.KGE_train
+agg["dNSE"] = agg.NSE_test - agg.NSE_train
+agg = agg.sort_values("KGE_test", ascending=False)
+md(agg[["KGE_test", "NSE_test", "KGE_test_min", "KGE_test_sd", "dKGE", "dNSE",
+        "beta_test", "alpha_test", "PBIAS_test", "FHV_test"]].round(3))
+```
+
+```{python}
+#| label: fig-transfer
+#| fig-cap: "Out-of-sample KGE and NSE by calibration objective. Left: the three wet-shift splits (test 20–46 % wetter than training) — this is the analogue of the real evaluation window. Right: the temporal split (test slightly drier). Points are individual surrogate×split results, bars the mean."
+order = agg.index.tolist()
+fig, axs = plt.subplots(1, 2, figsize=(12, 4.6), sharey=True)
+for ax, (sub, ttl) in zip(axs, [(W, "wet-shift splits (3 blocks × 2 surrogates)"),
+                                (T[T.objective.isin(order)], "temporal split (2 surrogates)")]):
+    m = sub.groupby("objective")[["KGE_test", "NSE_test"]].mean().reindex(order)
+    y = np.arange(len(order))
+    ax.barh(y - 0.2, m.KGE_test, height=0.38, label="KGE (test)", color="#1f77b4")
+    ax.barh(y + 0.2, m.NSE_test, height=0.38, label="NSE (test)", color="#ff7f0e")
+    for j, ob in enumerate(order):
+        d = sub[sub.objective == ob]
+        ax.plot(d.KGE_test, np.full(len(d), j - 0.2), "k.", ms=3, alpha=.7)
+        ax.plot(d.NSE_test, np.full(len(d), j + 0.2), "k.", ms=3, alpha=.7)
+    ax.set_yticks(y); ax.set_yticklabels(order); ax.set_xlim(0.2, 0.9)
+    ax.set_xlabel("out-of-sample efficiency"); ax.set_title(ttl); ax.legend(loc="lower right")
+axs[0].invert_yaxis()
+save(fig, "objective_transfer"); plt.show()
+```
+
+```{python}
+#| label: fig-tradeoff
+#| fig-cap: "Calibration score vs out-of-sample score for the wet-shift splits. Points below the 1:1 line lose performance when transferred to a wetter period; the vertical distance is the transfer loss. Objectives that win in calibration are not the ones that win out of sample."
+fig, ax = plt.subplots(1, 2, figsize=(10, 4.2))
+for a, met in zip(ax, ["KGE", "NSE"]):
+    g = W.groupby("objective")[[f"{met}_train", f"{met}_test"]].mean()
+    a.plot([0.5, 0.95], [0.5, 0.95], "k--", lw=0.8)
+    a.scatter(g[f"{met}_train"], g[f"{met}_test"], s=28, c="#1f77b4")
+    for ob, r_ in g.iterrows():
+        a.annotate(ob, (r_[f"{met}_train"], r_[f"{met}_test"]), fontsize=6.5,
+                   xytext=(3, 2), textcoords="offset points")
+    a.set_xlabel(f"{met} on the training years"); a.set_ylabel(f"{met} on the wetter test block")
+    a.set_title(f"{met}: calibration vs wet-shift transfer")
+save(fig, "transfer_tradeoff"); plt.show()
+```
+
+```{python}
+#| label: tbl-regret
+#| tbl-cap: "Overall ranking. 'Regret' = mean shortfall of the objective behind the best objective of each individual surrogate×split experiment, averaged over all 8 experiments (4 splits × 2 surrogates), separately for KGE and NSE; 0 = always the best choice. 'worst case' = largest single-experiment shortfall in KGE."
+common = R.groupby("objective").size()
+common = common[common == R.groupby("objective").size().max()].index
+best = R.groupby(["model", "split"])[["KGE_test", "NSE_test"]].transform("max")
+Rg = R.assign(regret_KGE=best.KGE_test - R.KGE_test, regret_NSE=best.NSE_test - R.NSE_test)
+Rg = Rg[Rg.objective.isin(common)]
+REG = (Rg.groupby("objective")
+         .agg(regret_KGE=("regret_KGE", "mean"), regret_NSE=("regret_NSE", "mean"),
+              worst_case_KGE=("regret_KGE", "max"), n=("regret_KGE", "size")))
+REG["regret_mean"] = 0.5 * (REG.regret_KGE + REG.regret_NSE)
+REG = REG.sort_values("regret_mean")
+md(REG.round(4))
+```
+
+```{python}
+#| label: fig-objcorr
+#| fig-cap: "Redundancy of the candidate objectives. Spearman rank correlation between objective values over an ensemble of 6 000 Latin-hypercube HyMOD parameter sets (calibration metric window), restricted to the 'behavioural' subset with KGE > 0. Blocks of near-1 correlation are objectives that would select essentially the same parameter set."
+def lhs(n, bounds, seed=SEED):
+    r = np.random.default_rng(seed); d = bounds.shape[0]; u = np.empty((n, d))
+    for j in range(d):
+        u[:, j] = (r.permutation(n) + r.random(n)) / n
+    return bounds[:, 0] + u * (bounds[:, 1] - bounds[:, 0])
+
+TH = lhs(6000, BOUNDS[0])
+SB = simulate_batch(P, PET, TH, 0)
+vals = {}
+for cname, f in CANDIDATES.items():
+    vals[cname] = np.array([f(SB[i][MM], O) for i in range(len(TH))])
+V = pd.DataFrame(vals).replace([np.inf, -np.inf], np.nan)
+beh = V["KGE"] > 0.0
+C = V[beh].rank().corr(method="pearson")
+fig, ax = plt.subplots(figsize=(8.4, 7))
+sns.heatmap(C, cmap="viridis", vmin=0, vmax=1, annot=True, fmt=".2f", annot_kws={"size": 6},
+            linewidths=.3, ax=ax, cbar_kws={"label": "Spearman ρ"})
+ax.set_title(f"Objective redundancy over {int(beh.sum())} behavioural HyMOD simulations")
+save(fig, "objective_correlation"); plt.show()
+print("Spearman rho with KGE:",
+      C["KGE"].drop("KGE").sort_values(ascending=False).round(3).to_dict())
+```
+
+# Recommendation {#sec-recommendation}
+
+```{python}
+#| label: decide
+REC = "KGE_NSE_50"
+print("best mean test KGE on the wet-shift splits :", agg.index[0])
+print("best mean test KGE on the temporal split   :", piv.index[0])
+print("lowest combined regret over all 8 experiments:", REG.index[0])
+print("\nrecommended objective:", REC, "=", mx.OBJECTIVE_NAME, "in src/common/metrics_extra.py")
+print("\nOut-of-sample performance on the three wetter blocks (mean of 6 experiments):")
+print(agg.reindex([REC, "KGE", "NSE", "KGE_sqrt", "NSE_sqrt", "KNS_333"])[
+      ["KGE_test", "NSE_test", "dKGE", "dNSE", "beta_test", "alpha_test"]].dropna(how="all").round(4))
+print("\nRegret over all 8 experiments (mean shortfall behind the best objective of each):")
+print(REG.reindex([REC, "KGE", "NSE", "KGE_sqrt", "NSE_sqrt", "KNS_333", "KNS_442",
+                   "KN_7030", "KGEmix_sqrt50"]).dropna(how="all").round(4))
+```
+
+## The decision
+
+**Calibrate on $\mathcal{O}=0.5\,\mathrm{KGE}(Q)+0.5\,\mathrm{NSE}(Q)$ — maximise — on
+1952-10-01…1988-09-30; equivalently minimise $1-\mathcal{O}$.**
+
+This is *not* the answer the catalogue alone would have suggested (a KGE + $\sqrt{Q}$ composite);
+it is what @sec-transfer produced. The decisive numbers:
+
+| Criterion | Evidence |
+|---|---|
+| **Alignment with the reported metrics** | The objective *is* the unweighted average of the two reported metrics on untransformed $Q$ — nothing is optimised that is not reported, and nothing reported is left out. No transform, no $\varepsilon$, no tuning constant other than the 50/50 weight. |
+| **The two terms are not redundant** | Over 6 000 behavioural HyMOD simulations the Spearman rank correlation between KGE and NSE is only ≈0.7 (@fig-objcorr): KGE and NSE genuinely disagree about which parameter set is better on this record, so averaging them is a real multi-criteria compromise, not a re-scaling. |
+| **Robustness to the skew and to volume bias** | KGE's $\beta$ term supplies the water-balance control that NSE lacks at CV = 2.107 (factor 14–89, @tbl-bias-sens), while NSE's stronger timing sensitivity (@sec-synthetic item 2) compensates KGE's weaker one. The pair covers each other's blind spots. |
+| **Transfer to a wetter period** | @tbl-regret: worst-case regret 0.056 (KGE) and 0.047 (NSE) — the only candidate of the 24 that keeps **both** below 0.06. KGE-only calibration has a worst case of 0.162 in NSE, NSE-only 0.107 in KGE. On the wet blocks the recommendation reaches mean KGE 0.773 / NSE 0.725 against 0.783/0.697 (KGE-only) and 0.743/0.734 (NSE-only): it gives up ≈0.010 KGE to gain ≈0.028 NSE. |
+| **Parsimony** | Three further variants were run through all 8 experiments: $(\mathrm{KGE}+\mathrm{NSE}+\mathrm{KGE}(\sqrt Q))/3$, $0.4/0.4/0.2$ and $0.7\,\mathrm{KGE}+0.3\,\mathrm{NSE}$. The first two are indistinguishable from the recommendation (all out-of-sample means differ by < 0.001); the 70/30 weighting trades 0.004 KGE for 0.008 NSE and doubles the worst case. The simplest member of the tied group wins. |
+| **Optimiser and ML compatibility** | Smooth, bounded above by 1, ~0.9 ms per evaluation on 13 149 days, and differentiable everywhere — a10's global searches, a11–a15's calibrations and a09's gradient training all use the *same* scalar. |
+
+::: {.callout-note}
+## Honest limitation
+The recommendation does **not** improve low flows: out-of-sample log-NSE on the wet blocks is 0.666
+for the recommendation against 0.761 for sqrt-NSE and 0.591 for KGE-only, and the high-flow bias FHV
+is −16.9 % against −12.3 % for KGE-only. Balancing the hydrograph and maximising the two reported
+metrics are different goals, and `config/project.yaml` asks for the second. The low-flow and
+high-flow behaviour is therefore controlled through the *acceptance checks* in
+`config/metrics.yaml` (`|PBIAS| ≤ 10 %`, $\beta\in[0.90,1.10]$, $\alpha\in[0.85,1.15]$,
+$|\mathrm{FHV}| \le 25$ %, $|\Delta\mathrm{BFI}|\le0.15$), which a11–a15 must report, not through
+the objective. A slot that passes the acceptance checks *and* maximises $\mathcal{O}$ is both
+hydrologically sound and competitive in the ranking.
+:::
+
+## Why not each alternative
+
+* **Plain KGE (2009).** The ranking metric, and the declared fallback. It gives the best
+  out-of-sample KGE (regret 0.020 vs 0.026) — but the worst NSE of the whole KGE family
+  (regret 0.047, worst case 0.162, wet-block NSE 0.697). Since NSE is reported too, paying
+  0.006 KGE to remove that exposure is the better bet.
+* **NSE.** Nearly blind to volume bias at CV = 2.107 (@tbl-bias-sens): a 10 % volume error costs
+  0.0023 NSE and 0.100 KGE. NSE-only calibrations produced the largest $|\beta-1|$ on every wet
+  test block (mean $\beta$ = 1.103 vs 1.089) and the largest KGE regret (0.052). Never alone.
+* **RMSE / MSE / Gaussian likelihood.** Monotone transformations of each other and of NSE for a
+  fixed observation window — identical argmax, identical weakness. Not separate options.
+  (`LL_bc025` and `NSE_bc025` returned bit-identical parameter sets in @tbl-transfer-temporal,
+  which is the empirical demonstration of that equivalence.)
+* **KGE′ (2012).** $\gamma=\mathrm{CV}_s/\mathrm{CV}_o$ cancels a pure scaling error, so a uniformly
+  biased model is penalised once instead of twice. It wins single wet blocks (KGE 0.909 on
+  WY1961–63) but has the worst NSE regret of the KGE family (0.118) and out-of-sample log-NSE 0.11:
+  it buys KGE by wrecking the low-flow end.
+* **KGE″ (2021).** Built for $\mu_o\to0$ (ephemeral rivers). At CV = 2.107 it divides the bias by
+  2.1 before squaring and degenerates towards NSE; on the temporal split it was strictly worse than
+  KGE for both surrogates. Leaf River is perennial — there is nothing to fix.
+* **Non-parametric KGE.** Robust and FDC-based, and the best objective for HyMOD on the temporal
+  split, but it collapsed for the second surrogate (test NSE 0.257) because it optimises ranks and
+  FDC shape rather than event magnitudes. Mean KGE regret 0.077. Retained as a diagnostic.
+* **log-NSE / log-KGE / inverse-NSE.** @sec-synthetic items 3–4: they cannot see a 30 % raw-variance
+  error and they explode on 0.3 mm/d of low-flow noise. In the transfer experiment KGE_log was the
+  worst objective tested (mean KGE regret 0.181, NSE regret 0.579; test NSE −0.47 for one surrogate)
+  and inverse-NSE was second worst. With only 92 warm-up days before the evaluation metric window,
+  an objective dominated by the slowest store is also the most exposed to initial-state error.
+* **MAE.** A genuinely strong performer (best mean test KGE on the temporal split) and robust to the
+  tail, but it is not one of the reported metrics, it has no diagnostic decomposition, and its
+  worst-case KGE regret (0.091) is 1.6× the recommendation's.
+* **Formal likelihoods (GL, AR(1)).** Only justified if a10 chooses DREAM *and* the deliverable were
+  predictive uncertainty. They add 3–5 nuisance parameters and, in the Gaussian case, reduce to NSE.
+* **Signature / Pareto multi-objective.** A Pareto front cannot be handed to a11–a15 as a single
+  number and the final ranking is single-objective by construction. Signatures are used as
+  acceptance checks instead (@sec-a16).
+
+## Per-slot guidance
+
+| Slot | Model kind | Objective | Notes |
+|---|---|---|---|
+| 1–5, conceptual (`kind = "conceptual"`) | global search (a10) | maximise `mx.objective` $=0.5\,\mathrm{KGE}(Q)+0.5\,\mathrm{NSE}(Q)$, equivalently minimise `mx.objective_cost` | identical for every slot — otherwise a comparison between slots is not a comparison of models. Map non-finite costs to $10^6$. |
+| trainable / ML (`kind = "trainable"`, e.g. LSTM) | gradient descent | minimise `1 - objective` as a **full-batch** loss on the training mask, in torch with population sd (`unbiased=False`); the mini-batch NSE\* of @kratzert2019 may be used as the *inner* loss for stability, but early stopping and model selection use the composite on the internal-validation mask | KGE needs the whole batch: $\mu$, $\sigma$ and $r$ are not additive over mini-batches |
+| ensembles / hybrids | weights fitted on calibration only | same objective; weights fitted on the internal-validation mask (1981-10-01…1988-09-30) and then frozen | `config/project.yaml`: ensemble weights must never see evaluation data |
+
+Fallback if a slot's optimiser cannot handle the composite (a11–a15 must log this in their handoff):
+use plain **KGE (2009)** and report the difference. Do **not** fall back to NSE alone.
+
+# How Agent 16 must report {#sec-a16}
+
+```{python}
+#| label: tbl-a16-drift
+#| tbl-cap: "Transfer behaviour measured in Experiment 2 (13 core objectives, 2 surrogates). Deltas are test minus training window. The three wet blocks are the analogue of the real evaluation window; the temporal split is the opposite (drier) direction."
+core = [c for c in CORE]
+D = R[R.objective.isin(core)].copy()
+D["wet"] = np.where(D.split.str.startswith("temporal"), "temporal (drier test)", "wet blocks (wetter test)")
+drift = D.groupby("wet").agg(dKGE=("KGE_test", "mean"), dNSE=("NSE_test", "mean"),
+                             beta_train=("b_train", "mean"), beta_test=("b_test", "mean"),
+                             alpha_train=("a_train", "mean"), alpha_test=("a_test", "mean"))
+drift["dKGE"] = D.groupby("wet").apply(lambda g: (g.KGE_test - g.KGE_train).mean())
+drift["dNSE"] = D.groupby("wet").apply(lambda g: (g.NSE_test - g.NSE_train).mean())
+drift["dbeta"] = drift.beta_test - drift.beta_train
+drift["dalpha"] = drift.alpha_test - drift.alpha_train
+md(drift[["dKGE", "dNSE", "dbeta", "dalpha", "beta_train", "beta_test"]].round(4))
+```
+
+1. **Only KGE and NSE**, both on untransformed $Q$ in mm/day, both from `src/common/metrics.py`,
+   both on the evaluation metric window 1949-01-01…1951-09-30 (1 003 days; warm-up
+   1948-10-01…1948-12-31 excluded). No transformed variant and no diagnostic appears in the
+   ranking table (`final_report_metrics_only: true`).
+2. **Rank by KGE**, ties broken by NSE (`config/project.yaml: primary_selection_metric: KGE`).
+3. **Quote the benchmarks** of @tbl-benchmarks so the numbers are interpretable: the mean-flow
+   benchmark gives NSE 0.000 and **KGE −0.414** [@knoben2019] — KGE = 0 is already a non-trivial
+   model, and a KGE of 0.7 is *not* "70 % of perfect". One-day persistence gives NSE 0.78 /
+   KGE 0.89 on calibration: a rainfall–runoff model that does not beat that has added nothing.
+4. **Report the calibration-window KGE and NSE next to the evaluation values** so the transfer is
+   visible. Experiment 2 gives the quantitative expectation (@tbl-a16-drift): moving a calibrated
+   model to a **wetter** period of similar length changed KGE by **+0.007 on average**
+   (range −0.05…+0.05 across blocks) and NSE by **−0.007** — i.e. a wetter evaluation period is
+   *not* intrinsically harder. The damaging direction is the opposite one: moving to a 6 % *drier*
+   period cost ΔKGE −0.077 and ΔNSE −0.054. A large drop on the evaluation window should therefore
+   be read as over-fitting or a warm-up artefact, not as "the evaluation period is wetter".
+5. **Expect the volume ratio to fall.** Across the three wet blocks $\beta$ dropped by
+   **−0.068** relative to its value on the training years (and rose by +0.108 in the dry
+   direction), with $\alpha$ moving the same way. On a 29 %-wetter evaluation window a $\beta$
+   of 0.93–1.00 for a model calibrated to $\beta\approx1.03$ is the *expected* outcome. This is a
+   prediction to be checked, **not** a correction: no model may be re-tuned for it, and no
+   statistic of the evaluation window may enter any calibration.
+6. **Only 92 warm-up days** precede the evaluation metric window (against 366 in calibration), so
+   the initial-state choice is visible in Jan–Mar 1949. a16 should state the initialisation used
+   and, as a robustness check, report KGE/NSE with the first 30 metric days dropped — as a
+   *footnote*, never as the headline number.
+7. Diagnostics ($r,\alpha,\beta$, PBIAS, FHV, FLV, log-NSE, BFI) may be computed for the discussion
+   but must be visually separated from the ranking table.
+
+# Machine-readable specification
+
+`config/metrics.yaml` is the contract for a10 and a11–a15; `tests/test_metrics_extra.py`
+asserts that it and `src/common/metrics_extra.py` agree.
+
+```{python}
+#| label: show-config
+print(open(ROOT / "config" / "metrics.yaml").read())
+```
+
+```{python}
+#| label: verify
+#| code-fold: false
+# The objective shipped in metrics_extra is exactly the one recommended above.
+sel = R.query("objective == @REC and model == 'HyMOD' and split.str.startswith('temporal')")
+chk = simulate_batch(P, PET, np.atleast_2d(sel[[f"p_{k}" for k in PNAMES[0]]].to_numpy()[0]), 0)[0]
+assert abs(mx.objective(chk[MM], O) - (0.5 * kge(chk[MM], O) + 0.5 * nse(chk[MM], O))) < 1e-12
+assert abs(mx.objective_cost(chk[MM], O) - (1 - mx.objective(chk[MM], O))) < 1e-12
+assert mx.objective(O, O) == 1.0 and mx.objective_cost(O, O) == 0.0
+print("objective() verified: perfect = 1.0, cost = 1 - objective, maximise.")
+print(f"library: {len(mx.METRICS)} metrics registered in mx.METRICS")
+```
+
+# Environment
+
+```{python}
+#| label: versions
+import numpy, scipy, pandas, matplotlib, seaborn, numba, platform
+try:
+    import hydroeval; hv = hydroeval.__version__
+except Exception:
+    hv = "n/a"
+print(f"python {platform.python_version()} | numpy {numpy.__version__} | pandas {pandas.__version__} | "
+      f"scipy {scipy.__version__} | numba {numba.__version__} | matplotlib {matplotlib.__version__} | "
+      f"seaborn {seaborn.__version__} | hydroeval {hv} | seed {SEED}")
+```
+
+# References {.unnumbered}
+
+::: {#refs}
+:::
