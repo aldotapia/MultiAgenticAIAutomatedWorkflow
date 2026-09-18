@@ -1,0 +1,19 @@
+# Filled by Agent 3 (a03-model-proposer). Builders (5-9) and optimizers (11-15) read their slot.
+# Template shows the REQUIRED schema. status: proposed -> built -> calibrated -> evaluated
+models:
+  - slot: 1
+    id: TBD                  # short snake_case id, e.g. linear_arx
+    name: TBD
+    family: TBD              # statistical | conceptual_lumped | data_driven | hybrid
+    source: TBD              # python package name+version OR "from_scratch"
+    module: src/models/model_1.py
+    inputs: [P, PET]
+    states: []
+    parameters: []           # list of {name, units, lower, upper, default, description}
+    timestep: daily
+    warmup_days_min: 90
+    builder_agent: a05-model-builder-1
+    optimizer_agent: a11-optimizer-1
+    recommended_optimizer: TBD   # filled by Agent 10
+    status: proposed
+  # slots 2..5 identical schema

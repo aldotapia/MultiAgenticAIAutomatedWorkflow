@@ -1,0 +1,103 @@
+# ===================================================================
+# Leaf River watershed modeling — SINGLE SOURCE OF TRUTH
+# All agents MUST read periods, paths and conventions from here.
+# Never hard-code dates anywhere else.
+# ===================================================================
+project:
+  name: leaf-river-streamflow
+  objective: "Build the model that best reproduces daily streamflow at the Leaf River outlet"
+  basin: "Leaf River near Collins, Mississippi, USA (USGS 02472000 — Agent 1 must verify)"
+  timezone_note: "Daily time step, calendar dates, no DST handling needed"
+
+data:
+  raw_file: data/raw/LeafRiverDaily.txt
+  format: whitespace-delimited, no header, scientific notation
+  n_rows: 14610
+  start_date: "1948-10-01"          # inferred: 14610 days = exactly WY1949–WY1988
+  end_date:   "1988-09-30"
+  columns:                          # order in file; Agent 2 must confirm units
+    - {name: P,   description: "Mean areal precipitation", units: "mm/day"}
+    - {name: PET, description: "Potential evapotranspiration", units: "mm/day"}
+    - {name: Q,   description: "Observed streamflow (depth over basin area)", units: "mm/day"}
+  missing_value_policy: "No negatives/NaN detected at scaffold time; Agent 2 re-checks"
+  processed_file: data/processed/leafriver_daily.parquet   # written by Agent 2 via src/common/data.py
+
+periods:
+  # ---------------------------------------------------------------------------------
+  # ACTIVE DEFINITION. Row indices are 0-based, Python half-open [start, end).
+  # User-specified evaluation window: rows 265:1360 (1095 days = "Oct 1 1948 – Sep 30 1951").
+  # WARNING (scaffold check): with start_date 1948-10-01, PET climatology peaks at cycle row ~266
+  # (late June) → the file really starts on Oct 1, so rows 265:1360 carry date labels
+  # 1949-06-23..1952-06-21. Switch `definition: dates` to use calendar dates instead.
+  # Agent 2 must document this discrepancy; nobody else changes it.
+  # ---------------------------------------------------------------------------------
+  definition: index            # index | dates
+  index:
+    evaluation:
+      run:     [265, 1360]     # 1095 rows
+      warmup:  [265, 357]      # first 92 rows ≙ Oct 1–Dec 31
+      metric:  [357, 1360]     # 1003 rows ≙ Jan 1 1949–Sep 30 1951
+    calibration:               # all data AFTER the evaluation window
+      run:     [1360, 14610]
+      warmup:  [1360, 1725]    # 365 rows
+      metric:  [1725, 14610]
+    calibration_internal:
+      train:      [1725, 12053]
+      validation: [12053, 14610]   # row 12053 = 1981-10-01
+    unused_pre_evaluation: [0, 265] # not used for fitting (adjacent to eval window); EDA only
+  dates:
+    evaluation:
+      run:     ["1948-10-01", "1951-09-30"]
+      warmup:  ["1948-10-01", "1948-12-31"]
+      metric:  ["1949-01-01", "1951-09-30"]
+    calibration:
+      run:     ["1951-10-01", "1988-09-30"]
+      warmup:  ["1951-10-01", "1952-09-30"]
+      metric:  ["1952-10-01", "1988-09-30"]
+    calibration_internal:
+      train:      ["1952-10-01", "1981-09-30"]
+      validation: ["1981-10-01", "1988-09-30"]
+
+evaluation_protocol:
+  required_metrics: [KGE, NSE]      # the ONLY metrics in the final report (Agent 16)
+  final_report_metrics_only: true   # diagnostics of any kind are allowed during development, not in the final report
+  ensembles_and_hybrids_allowed: true  # weights/structure must be fixed using calibration data only
+  primary_selection_metric: KGE     # Agent 4 may recommend otherwise; Agent 16 reports both regardless
+  kge_variant: "Gupta et al. (2009): 1 - sqrt((r-1)^2 + (alpha-1)^2 + (beta-1)^2), alpha = sigma_s/sigma_o"
+  nse: "1 - sum((s-o)^2) / sum((o - mean(o))^2)"
+  rule_no_eval_leakage: >
+    No agent except Agent 16 may compute any statistic on observed Q inside
+    the evaluation run window (rows 265:1360 under the active definition) for model building, feature engineering, scaling,
+    hyperparameter or parameter selection. Agent 2 may DESCRIBE the whole record
+    (EDA), but normalization stats for ML models must come from calibration only.
+  ml_state_note: >
+    For ML models (e.g., LSTM) the evaluation warm-up rows are used as
+    input sequence context only; lookback windows must not use observed Q from the eval period
+    as input unless the model is explicitly declared autoregressive in config/models.yaml
+    (discouraged: it is not comparable with conceptual models).
+
+compute:
+  environment: conda env `leafriver` (environment.yml)
+  hardware: "single laptop (likely Apple Silicon → torch device 'mps', else 'cpu'); no HPC"
+  torch_device_priority: [cuda, mps, cpu]
+  n_jobs_env_var: LR_N_JOBS          # cores an agent may use; run_pipeline.sh splits cores among parallel agents
+  max_wall_time_per_optimizer_hours: 3
+  lstm_max_epochs: 200
+
+external_references:
+  sacsma_numba_path: null            # optional: path to Aldo's existing Numba SAC-SMA, usable as test oracle by a08
+
+reproducibility:
+  random_seed: 42
+  python: ">=3.10"
+  float_dtype: float64
+
+paths:
+  context_dir: context
+  state_file: context/state.json
+  decision_log: context/DECISIONS.md
+  handoffs: context/handoffs
+  reports: reports
+  models_src: src/models
+  optim_src: src/optimization
+  results: results

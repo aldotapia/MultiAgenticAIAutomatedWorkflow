@@ -1,0 +1,13 @@
+{
+  "agent_id": "aXX-name",
+  "status": "done | blocked | partial",
+  "finished_at": "ISO-8601",
+  "summary": "2-4 sentences",
+  "outputs": ["paths"],
+  "key_numbers": {},
+  "assumptions": [],
+  "downstream_notes": {"aYY": "specific instruction for agent YY"},
+  "open_issues": [],
+  "reproduce": "exact shell command(s) to regenerate outputs",
+  "backup_tag": "backup/aXX-YYYYmmdd-HHMMSS"
+}

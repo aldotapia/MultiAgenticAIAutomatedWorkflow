@@ -1,0 +1,51 @@
+# conda env create -f environment.yml   (or: mamba env create -f environment.yml)
+# Works on macOS (Apple Silicon / Intel), Linux, Windows. PyTorch from pip → MPS on Apple Silicon.
+name: leafriver
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pip
+  # core
+  - numpy>=1.26,<2.1
+  - pandas>=2.1
+  - pyarrow
+  - scipy>=1.11
+  - pyyaml
+  - numba>=0.59
+  - joblib
+  - tqdm
+  # stats / hydrology
+  - statsmodels
+  - scikit-learn
+  - salib
+  - pymannkendall
+  # optimization
+  - optuna
+  - cma
+  - pymoo
+  - emcee
+  # plotting / reporting
+  - matplotlib
+  - seaborn
+  - tabulate
+  - jupyter
+  - ipykernel
+  - nbformat
+  - nbclient
+  - quarto              # Quarto CLI from conda-forge
+  # geospatial (Agent 1 maps)
+  - geopandas
+  - contextily
+  - requests
+  # dev
+  - pytest
+  - git
+  - pip:
+      - torch>=2.3        # MPS backend on Apple Silicon
+      - spotpy>=1.6       # SCE-UA, DREAM, ROPE, DDS
+      - pyswarms
+      - nevergrad
+      - hydroeval
+      - baseflow          # baseflow separation (Agent 2)
+      - dataretrieval     # USGS NWIS (Agent 1)

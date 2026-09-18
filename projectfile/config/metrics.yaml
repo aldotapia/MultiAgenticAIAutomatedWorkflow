@@ -1,0 +1,6 @@
+# Filled by Agent 4. Schema:
+recommended_objective: TBD        # metric optimized during calibration
+reporting_metrics: [KGE, NSE]     # always includes KGE and NSE
+secondary_diagnostics: []         # e.g. [KGE_r, KGE_alpha, KGE_beta, PBIAS, logNSE, FDC_slope_bias]
+transform_for_objective: none     # none | sqrt | log(Q+eps) | inverse
+rationale_report: reports/04_metrics.qmd

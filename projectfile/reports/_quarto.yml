@@ -1,0 +1,21 @@
+project:
+  type: website
+  output-dir: _site
+  render: ["*.qmd"]
+website:
+  title: "Leaf River Streamflow Modeling"
+  sidebar:
+    contents: [index.qmd, 01_watershed.qmd, 02_data.qmd, 03_models.qmd, 04_metrics.qmd, 10_optimization.qmd, 16_evaluation.qmd]
+format:
+  html:
+    theme: cosmo
+    toc: true
+    number-sections: true
+    code-fold: true
+    fig-dpi: 150
+execute:
+  freeze: auto
+  echo: true
+  warning: false
+bibliography: references.bib
+jupyter: leafriver

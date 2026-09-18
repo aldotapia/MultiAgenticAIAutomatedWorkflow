@@ -1,0 +1,62 @@
+# Multi-agent DAG for Leaf River streamflow modeling.
+# Runtime: Claude Code subagents (.claude/agents) + skills (.claude/skills).
+# The orchestrator (main Claude Code session, see CLAUDE.md) executes phases in order;
+# agents inside a phase run in parallel. A phase starts only when all its dependencies
+# have status "done" in context/state.json AND their handoff files exist.
+version: 1
+phases:
+  - id: P1_context
+    parallel: true
+    agents: [a01-watershed-characterizer, a02-data-analyst]
+  - id: P2_design
+    parallel: true            # a03 and a04 in parallel; a10 waits for a03
+    agents: [a03-model-proposer, a04-metrics-advisor]
+  - id: P3_optim_design
+    agents: [a10-optimization-advisor]
+  - id: P4_build
+    parallel: true
+    agents: [a05-model-builder-1, a06-model-builder-2, a07-model-builder-3, a08-model-builder-4, a09-model-builder-5]
+  - id: P5_calibrate
+    parallel: true
+    agents: [a11-optimizer-1, a12-optimizer-2, a13-optimizer-3, a14-optimizer-4, a15-optimizer-5]
+  - id: P6_evaluate
+    agents: [a16-evaluator]
+
+agents:
+  a01-watershed-characterizer:
+    depends_on: []
+    inputs: [config/project.yaml]
+    outputs: [reports/01_watershed.qmd, context/handoffs/a01.json]
+  a02-data-analyst:
+    depends_on: []
+    inputs: [config/project.yaml, data/raw/LeafRiverDaily.txt]
+    outputs: [reports/02_data.qmd, data/processed/leafriver_daily.parquet, context/handoffs/a02.json]
+  a03-model-proposer:
+    depends_on: [a01-watershed-characterizer, a02-data-analyst]
+    outputs: [reports/03_models.qmd, config/models.yaml, context/handoffs/a03.json]
+  a04-metrics-advisor:
+    depends_on: [a02-data-analyst]
+    outputs: [reports/04_metrics.qmd, config/metrics.yaml, src/common/metrics_extra.py, context/handoffs/a04.json]
+  a10-optimization-advisor:
+    depends_on: [a03-model-proposer, a04-metrics-advisor]
+    outputs: [reports/10_optimization.qmd, config/optimization.yaml, context/handoffs/a10.json]
+  a05-model-builder-1: {depends_on: [a03-model-proposer], slot: 1, outputs: [src/models/model_1.py, tests/test_model_1.py, context/handoffs/a05.json]}
+  a06-model-builder-2: {depends_on: [a03-model-proposer], slot: 2, outputs: [src/models/model_2.py, tests/test_model_2.py, context/handoffs/a06.json]}
+  a07-model-builder-3: {depends_on: [a03-model-proposer], slot: 3, outputs: [src/models/model_3.py, tests/test_model_3.py, context/handoffs/a07.json]}
+  a08-model-builder-4: {depends_on: [a03-model-proposer], slot: 4, outputs: [src/models/model_4.py, tests/test_model_4.py, context/handoffs/a08.json]}
+  a09-model-builder-5: {depends_on: [a03-model-proposer], slot: 5, outputs: [src/models/model_5.py, tests/test_model_5.py, context/handoffs/a09.json]}
+  a11-optimizer-1: {depends_on: [a05-model-builder-1, a10-optimization-advisor], slot: 1, outputs: [results/calibration/model_1/, context/handoffs/a11.json]}
+  a12-optimizer-2: {depends_on: [a06-model-builder-2, a10-optimization-advisor], slot: 2, outputs: [results/calibration/model_2/, context/handoffs/a12.json]}
+  a13-optimizer-3: {depends_on: [a07-model-builder-3, a10-optimization-advisor], slot: 3, outputs: [results/calibration/model_3/, context/handoffs/a13.json]}
+  a14-optimizer-4: {depends_on: [a08-model-builder-4, a10-optimization-advisor], slot: 4, outputs: [results/calibration/model_4/, context/handoffs/a14.json]}
+  a15-optimizer-5: {depends_on: [a09-model-builder-5, a10-optimization-advisor], slot: 5, outputs: [results/calibration/model_5/, context/handoffs/a15.json]}
+  a16-evaluator:
+    depends_on: [a11-optimizer-1, a12-optimizer-2, a13-optimizer-3, a14-optimizer-4, a15-optimizer-5]
+    outputs: [reports/16_evaluation.qmd, results/evaluation/, context/handoffs/a16.json]
+
+global_rules:
+  - "Read CLAUDE.md, config/project.yaml and context/CONTEXT.md before doing anything."
+  - "Load data ONLY via src/common/data.py; compute KGE/NSE ONLY via src/common/metrics.py."
+  - "Only a16 touches the evaluation period (enforced by LR_AGENT=a16 guard)."
+  - "On finish: write handoff JSON, append to context/CONTEXT.md and context/DECISIONS.md, update context/state.json, run scripts/backup.sh <agent_id>."
+  - "Never edit another agent's outputs; request changes via context/ISSUES.md."

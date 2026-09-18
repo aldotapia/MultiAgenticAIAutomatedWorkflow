@@ -1,0 +1,7 @@
+# Filled by Agent 10. Schema:
+default_budget:
+  max_function_evals: 20000   # laptop: a10 must keep each optimizer <= 3 h wall time
+  n_restarts: 5                   # independent seeds to check equifinality/convergence
+  seeds: [42, 43, 44, 45, 46]
+per_model: {}                     # {model_id: {algorithm, library, settings, budget}}
+rationale_report: reports/10_optimization.qmd

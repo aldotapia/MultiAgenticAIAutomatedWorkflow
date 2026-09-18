@@ -1,0 +1,4 @@
+---
+title: "Leaf River Streamflow Modeling — Overview"
+---
+Multi-agent workflow. See sidebar for each agent's report. Periods and rules: `config/project.yaml`.
